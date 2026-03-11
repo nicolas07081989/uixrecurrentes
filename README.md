@@ -8,7 +8,10 @@ Este espacio está preparado para documentar y desarrollar funcionalidades relac
 
 ## Estructura actual
 
-- `README.md`: documentación inicial del proyecto.
+- `theuix-datafast-recurring/`: plugin WordPress para suscripciones y cobros recurrentes con Datafast.
+- `pg-woocommerce-plugin-master/`: plugin base de WooCommerce de referencia.
+- `docs/`: documentación funcional y técnica.
+- `README.md`: resumen general del repositorio.
 
 ## Cómo empezar
 
@@ -22,6 +25,7 @@ Este espacio está preparado para documentar y desarrollar funcionalidades relac
 - Añadir una estructura inicial de carpetas (`src/`, `tests/`, `docs/`).
 - Configurar herramientas de calidad (linting, formateo y pruebas).
 - Completar este README con instrucciones de instalación y uso.
+- Documentar el flujo end-to-end de checkout inicial y runner de cobros recurrentes.
 
 ## Licencia
 
