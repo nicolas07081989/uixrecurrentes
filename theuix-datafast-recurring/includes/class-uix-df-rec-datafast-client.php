@@ -48,13 +48,25 @@ class UIX_DF_Rec_Datafast_Client
         return $this->request('POST', $url, $payload, 'recurring');
     }
 
+
+    private function normalized_auth_header($mode)
+    {
+        $token = $this->token($mode);
+        if ($token === '') {
+            return '';
+        }
+
+        $token = preg_replace('/^Bearer\s+/i', '', $token);
+        return 'Bearer ' . trim((string) $token);
+    }
+
     private function request($method, $url, array $payload, $mode)
     {
         $args = [
             'method' => $method,
             'timeout' => 30,
             'headers' => [
-                'Authorization' => 'Bearer ' . $this->token($mode),
+                'Authorization' => $this->normalized_auth_header($mode),
                 'Content-Type' => 'application/x-www-form-urlencoded',
             ],
         ];

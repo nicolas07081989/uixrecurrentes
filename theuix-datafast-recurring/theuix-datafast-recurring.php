@@ -19,7 +19,6 @@ require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-result-codes.php
 require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-logger.php';
 require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-datafast-client.php';
 require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-subscription-repo.php';
-require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-wc-gateway.php';
 require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-plugin.php';
 
 register_activation_hook(__FILE__, ['UIX_DF_Rec_DB', 'activate']);

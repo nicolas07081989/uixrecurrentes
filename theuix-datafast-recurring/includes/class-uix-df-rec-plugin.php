@@ -33,15 +33,71 @@ class UIX_DF_Rec_Plugin
 
         add_action('uix_df_recurring_charge_runner', [$this, 'run_recurring_runner']);
 
-        add_filter('woocommerce_payment_gateways', [$this, 'register_wc_gateway']);
+        add_action('woocommerce_loaded', [$this, 'bootstrap_wc_gateway']);
+        add_action('plugins_loaded', [$this, 'maybe_show_woocommerce_notice'], 20);
+        if (class_exists('WC_Payment_Gateway')) {
+            $this->bootstrap_wc_gateway();
+        }
 
         UIX_DF_Rec_DB::schedule_events();
     }
 
 
+
+    public function maybe_show_woocommerce_notice()
+    {
+        if (class_exists('WooCommerce')) {
+            return;
+        }
+
+        if (!is_admin() || !current_user_can('activate_plugins')) {
+            return;
+        }
+
+        add_action('admin_notices', function () {
+            echo '<div class="notice notice-warning"><p><strong>TheUIX Datafast Recurring:</strong> WooCommerce no está activo. Actívalo para usar la pasarela de pago.</p></div>';
+        });
+    }
+
+    public function bootstrap_wc_gateway()
+    {
+        if (!class_exists('WC_Payment_Gateway')) {
+            return;
+        }
+
+        $this->load_wc_gateway_class();
+        add_filter('woocommerce_payment_gateways', [$this, 'register_wc_gateway']);
+    }
+
+    private function load_wc_gateway_class()
+    {
+        if (!class_exists('UIX_DF_Rec_WC_Gateway')) {
+            require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-wc-gateway.php';
+        }
+    }
+
+    private function payment_brands_attr()
+    {
+        $brandsRaw = trim((string) get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER'));
+        if ($brandsRaw === '') {
+            $brandsRaw = 'VISA MASTER AMEX DINERS DISCOVER';
+        }
+
+        $brands = preg_split('/\s+/', strtoupper($brandsRaw));
+        $brands = array_filter(array_unique(array_map('sanitize_text_field', $brands)));
+
+        return implode(' ', $brands);
+    }
+
     public function register_wc_gateway($methods)
     {
-        if (class_exists('UIX_DF_Rec_WC_Gateway')) {
+        if (!class_exists('WC_Payment_Gateway')) {
+            return $methods;
+        }
+
+        $this->load_wc_gateway_class();
+
+        if (class_exists('UIX_DF_Rec_WC_Gateway') && !in_array('UIX_DF_Rec_WC_Gateway', $methods, true)) {
             $methods[] = 'UIX_DF_Rec_WC_Gateway';
         }
 
@@ -120,7 +176,7 @@ class UIX_DF_Rec_Plugin
             'currency' => 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultURL' => $returnUrl,
+            'shopperResultUrl' => $returnUrl,
             'customer.givenName' => $nameParts[0] ?? $fullName,
             'customer.surname' => $nameParts[1] ?? 'Cliente',
             'customer.email' => $email,
@@ -151,7 +207,7 @@ class UIX_DF_Rec_Plugin
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar suscripción</title></head><body>';
         echo '<h2>Finaliza tu pago</h2>';
         echo '<script src="' . esc_url($widgetJs) . '"></script>';
-        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="VISA MASTER AMEX DINERS DISCOVER ALIA"></form>';
+        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '"></form>';
         echo '<script src="https://www.datafast.com.ec/js/dfAdditionalValidations1.js"></script>';
         echo '</body></html>';
         exit;
@@ -212,7 +268,7 @@ class UIX_DF_Rec_Plugin
             'currency' => $order->get_currency() ?: 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultURL' => $returnUrl,
+            'shopperResultUrl' => $returnUrl,
             'customer.givenName' => $order->get_billing_first_name() ?: 'Cliente',
             'customer.surname' => $order->get_billing_last_name() ?: 'Woo',
             'customer.email' => $order->get_billing_email(),
@@ -246,7 +302,7 @@ class UIX_DF_Rec_Plugin
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar orden</title></head><body>';
         echo '<h2>Finaliza tu pago</h2>';
         echo '<script src="' . esc_url($widgetJs) . '"></script>';
-        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="VISA MASTER AMEX DINERS DISCOVER ALIA"></form>';
+        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '"></form>';
         echo '<script src="https://www.datafast.com.ec/js/dfAdditionalValidations1.js"></script>';
         echo '</body></html>';
         exit;
@@ -382,6 +438,7 @@ class UIX_DF_Rec_Plugin
             'uix_df_recurring_base_url',
             'uix_df_recurring_test_mode_enabled',
             'uix_df_default_max_retries',
+            'uix_df_payment_brands',
         ];
 
         foreach ($keys as $key) {
@@ -406,6 +463,7 @@ class UIX_DF_Rec_Plugin
                     <tr><th>Bearer Token</th><td><input class="regular-text" name="uix_df_initial_bearer_token" value="<?php echo esc_attr(get_option('uix_df_initial_bearer_token', '')); ?>"></td></tr>
                     <tr><th>Base URL</th><td><input class="regular-text" name="uix_df_initial_base_url" value="<?php echo esc_attr(get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com')); ?>"></td></tr>
                     <tr><th>Test mode</th><td><label><input type="checkbox" name="uix_df_initial_test_mode_enabled" value="1" <?php checked(get_option('uix_df_initial_test_mode_enabled', 1), 1); ?>> EXTERNAL</label></td></tr>
+                    <tr><th>Marcas permitidas</th><td><input class="regular-text" name="uix_df_payment_brands" value="<?php echo esc_attr(get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER')); ?>"><p class="description">Separadas por espacio. Default sin ALIA por compatibilidad general.</p></td></tr>
                 </table>
 
                 <h2>Cobro recurrente</h2>
@@ -470,6 +528,7 @@ class UIX_DF_Rec_Plugin
             'recurring_bearer_token' => get_option('uix_df_recurring_bearer_token', ''),
             'recurring_base_url' => get_option('uix_df_recurring_base_url', 'https://eu-test.oppwa.com'),
             'recurring_test_mode_enabled' => (bool) get_option('uix_df_recurring_test_mode_enabled', 1),
+            'payment_brands' => get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER'),
         ];
     }
 }
