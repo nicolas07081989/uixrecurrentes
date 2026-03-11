@@ -77,13 +77,18 @@ class UIX_DF_Rec_Datafast_Client
             $args['body'] = http_build_query($payload);
         }
 
+        UIX_DF_Rec_Logger::info('Datafast request', ['method' => $method, 'url' => $url, 'mode' => $mode, 'payload' => $payload]);
+
         $response = wp_remote_request($url, $args);
 
         if (is_wp_error($response)) {
+            UIX_DF_Rec_Logger::error('Datafast wp_remote_request error', ['mode' => $mode, 'error' => $response->get_error_message()]);
             return ['ok' => false, 'error' => $response->get_error_message(), 'status' => 0, 'body' => null];
         }
 
-        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $rawBody = wp_remote_retrieve_body($response);
+        $body = json_decode($rawBody, true);
+        UIX_DF_Rec_Logger::info('Datafast response', ['mode' => $mode, 'status' => (int) wp_remote_retrieve_response_code($response), 'body' => is_array($body) ? $body : $rawBody]);
         return [
             'ok' => true,
             'status' => (int) wp_remote_retrieve_response_code($response),

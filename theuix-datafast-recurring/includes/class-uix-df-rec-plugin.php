@@ -163,6 +163,7 @@ class UIX_DF_Rec_Plugin
         ]);
 
         $settings = $this->settings();
+        UIX_DF_Rec_Logger::info('Initial shortcode checkout requested', ['plan' => $planSlug, 'amount' => $amount, 'email' => $email]);
         $client = new UIX_DF_Rec_Datafast_Client($settings);
         $returnUrl = add_query_arg([
             'uix_df_return' => 1,
@@ -176,7 +177,7 @@ class UIX_DF_Rec_Plugin
             'currency' => 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultUrl' => $returnUrl,
+            'shopperResultURL' => $returnUrl,
             'customer.givenName' => $nameParts[0] ?? $fullName,
             'customer.surname' => $nameParts[1] ?? 'Cliente',
             'customer.email' => $email,
@@ -193,9 +194,10 @@ class UIX_DF_Rec_Plugin
             $payload['testMode'] = 'EXTERNAL';
         }
 
+        UIX_DF_Rec_Logger::info('Creating initial checkout (shortcode)', ['subscription_id' => $subscriptionId, 'payload' => $payload]);
         $response = $client->create_checkout($payload);
         if (!$response['ok'] || empty($response['body']['id'])) {
-            UIX_DF_Rec_Logger::info('Checkout creation failed', $response);
+            UIX_DF_Rec_Logger::error('Checkout creation failed (shortcode)', ['subscription_id' => $subscriptionId, 'response' => $response]);
             wp_die('No se pudo crear checkout. Revisa configuración Datafast.');
         }
 
@@ -253,6 +255,7 @@ class UIX_DF_Rec_Plugin
         }
 
         $settings = $this->settings();
+        UIX_DF_Rec_Logger::info('WC order checkout requested', ['order_id' => $orderId, 'order_total' => $order->get_total(), 'subscription_id' => $subscriptionId]);
         $client = new UIX_DF_Rec_Datafast_Client($settings);
 
         $returnUrl = add_query_arg([
@@ -268,7 +271,7 @@ class UIX_DF_Rec_Plugin
             'currency' => $order->get_currency() ?: 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultUrl' => $returnUrl,
+            'shopperResultURL' => $returnUrl,
             'customer.givenName' => $order->get_billing_first_name() ?: 'Cliente',
             'customer.surname' => $order->get_billing_last_name() ?: 'Woo',
             'customer.email' => $order->get_billing_email(),
@@ -286,9 +289,10 @@ class UIX_DF_Rec_Plugin
             $payload['testMode'] = 'EXTERNAL';
         }
 
+        UIX_DF_Rec_Logger::info('Creating initial checkout (Woo order)', ['order_id' => $orderId, 'subscription_id' => $subscriptionId, 'payload' => $payload]);
         $response = $client->create_checkout($payload);
         if (!$response['ok'] || empty($response['body']['id'])) {
-            UIX_DF_Rec_Logger::info('WC checkout creation failed', $response);
+            UIX_DF_Rec_Logger::error('WC checkout creation failed', ['order_id' => $orderId, 'subscription_id' => $subscriptionId, 'response' => $response]);
             wc_add_notice(__('No se pudo inicializar el pago con Datafast.', 'uix-df-rec'), 'error');
             wp_safe_redirect($order->get_checkout_payment_url());
             exit;
@@ -328,9 +332,11 @@ class UIX_DF_Rec_Plugin
 
         $settings = $this->settings();
         $client = new UIX_DF_Rec_Datafast_Client($settings);
+        UIX_DF_Rec_Logger::info('Verifying initial payment', ['subscription_id' => $subscriptionId, 'resourcePath' => $resourcePath]);
         $verification = $client->verify_payment($resourcePath, $settings['initial_entity_id']);
 
         if (!$verification['ok']) {
+            UIX_DF_Rec_Logger::error('Initial verification failed', ['subscription_id' => $subscriptionId, 'verification' => $verification]);
             wp_die('No se pudo verificar el pago');
         }
 
@@ -352,6 +358,7 @@ class UIX_DF_Rec_Plugin
         ]);
 
         $ok = UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '') && !empty($body['registrationId']);
+        UIX_DF_Rec_Logger::info('Initial payment verification result', ['subscription_id' => $subscriptionId, 'ok' => $ok, 'result_code' => $body['result']['code'] ?? null, 'has_registration' => !empty($body['registrationId'])]);
 
         $orderId = isset($_GET['order_id']) ? (int) $_GET['order_id'] : 0;
         if ($orderId > 0 && function_exists('wc_get_order')) {
@@ -380,11 +387,13 @@ class UIX_DF_Rec_Plugin
     {
         $settings = $this->settings();
         if (empty($settings['recurring_entity_id']) || empty($settings['recurring_bearer_token'])) {
+            UIX_DF_Rec_Logger::info('Recurring runner skipped: missing recurring credentials');
             return;
         }
 
         $client = new UIX_DF_Rec_Datafast_Client($settings);
         $subs = $this->repo->due_for_recurring(25);
+        UIX_DF_Rec_Logger::info('Recurring runner started', ['due_count' => count($subs)]);
 
         foreach ($subs as $sub) {
             $payload = [
@@ -399,6 +408,7 @@ class UIX_DF_Rec_Plugin
                 $payload['testMode'] = 'EXTERNAL';
             }
 
+            UIX_DF_Rec_Logger::info('Recurring charge attempt', ['subscription_id' => (int)$sub['id'], 'status' => $sub['status'], 'next_charge_at' => $sub['next_charge_at']]);
             $response = $client->recurring_payment($sub['registration_id'], $payload);
             $body = $response['body'] ?? [];
 
@@ -439,6 +449,7 @@ class UIX_DF_Rec_Plugin
             'uix_df_recurring_test_mode_enabled',
             'uix_df_default_max_retries',
             'uix_df_payment_brands',
+            'uix_df_debug_enabled',
         ];
 
         foreach ($keys as $key) {
@@ -464,6 +475,7 @@ class UIX_DF_Rec_Plugin
                     <tr><th>Base URL</th><td><input class="regular-text" name="uix_df_initial_base_url" value="<?php echo esc_attr(get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com')); ?>"></td></tr>
                     <tr><th>Test mode</th><td><label><input type="checkbox" name="uix_df_initial_test_mode_enabled" value="1" <?php checked(get_option('uix_df_initial_test_mode_enabled', 1), 1); ?>> EXTERNAL</label></td></tr>
                     <tr><th>Marcas permitidas</th><td><input class="regular-text" name="uix_df_payment_brands" value="<?php echo esc_attr(get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER')); ?>"><p class="description">Separadas por espacio. Default sin ALIA por compatibilidad general.</p></td></tr>
+                    <tr><th>Debug logs</th><td><label><input type="checkbox" name="uix_df_debug_enabled" value="1" <?php checked(get_option('uix_df_debug_enabled', 1), 1); ?>> Habilitar logs detallados</label></td></tr>
                 </table>
 
                 <h2>Cobro recurrente</h2>
@@ -529,6 +541,7 @@ class UIX_DF_Rec_Plugin
             'recurring_base_url' => get_option('uix_df_recurring_base_url', 'https://eu-test.oppwa.com'),
             'recurring_test_mode_enabled' => (bool) get_option('uix_df_recurring_test_mode_enabled', 1),
             'payment_brands' => get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER'),
+            'debug_enabled' => (bool) get_option('uix_df_debug_enabled', 1),
         ];
     }
 }
