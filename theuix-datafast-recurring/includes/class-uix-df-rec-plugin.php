@@ -152,7 +152,52 @@ class UIX_DF_Rec_Plugin
 
     private function should_allow_test_identification_fallback(array $settings)
     {
-        return !empty($settings['initial_test_mode_enabled']);
+        return !empty($settings['initial_test_mode_enabled']) && !empty($settings['allow_test_placeholders']);
+    }
+
+    private function normalize_identification_doc_id($value)
+    {
+        $digitsOnly = preg_replace('/\D+/', '', (string) $value);
+        $digitsOnly = (string) $digitsOnly;
+        if ($digitsOnly === '') {
+            return '';
+        }
+
+        if (strlen($digitsOnly) > 10) {
+            return substr($digitsOnly, 0, 10);
+        }
+
+        return str_pad($digitsOnly, 10, '0', STR_PAD_LEFT);
+    }
+
+    private function validate_required_payload_fields(array $payload, array $requiredKeys)
+    {
+        $missing = [];
+        foreach ($requiredKeys as $requiredKey) {
+            if (!array_key_exists($requiredKey, $payload) || trim((string) $payload[$requiredKey]) === '') {
+                $missing[] = $requiredKey;
+            }
+        }
+
+        return $missing;
+    }
+
+    private function resolve_customer_name_parts($firstNameRaw, $lastNameRaw)
+    {
+        $firstNameRaw = trim((string) $firstNameRaw);
+        $lastNameRaw = trim((string) $lastNameRaw);
+
+        $firstParts = preg_split('/\s+/', $firstNameRaw);
+        $firstParts = array_values(array_filter($firstParts));
+
+        $givenName = isset($firstParts[0]) ? $firstParts[0] : $firstNameRaw;
+        $middleName = isset($firstParts[1]) ? $firstParts[1] : $givenName;
+
+        return [
+            'given' => $givenName,
+            'middle' => $middleName,
+            'surname' => $lastNameRaw,
+        ];
     }
 
     private function remove_empty_payload_fields(array $payload)
@@ -260,7 +305,6 @@ class UIX_DF_Rec_Plugin
             'currency' => 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultUrl' => $returnUrl,
             'customer.givenName' => $nameParts[0] ?? $fullName,
             'customer.surname' => $nameParts[1] ?? 'Cliente',
             'customer.email' => $email,
@@ -299,7 +343,7 @@ class UIX_DF_Rec_Plugin
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar suscripción</title></head><body>';
         echo '<h2>Finaliza tu pago</h2>';
         echo '<script src="' . esc_url($widgetJs) . '"></script>';
-        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '"></form>';
+        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '" data-create-registration="true"></form>';
         echo '<script src="https://www.datafast.com.ec/js/dfAdditionalValidations1.js"></script>';
         echo '</body></html>';
         exit;
@@ -329,7 +373,8 @@ class UIX_DF_Rec_Plugin
 
         $settings = $this->settings();
 
-        $cedula = $this->get_order_identification($order);
+        $cedulaRaw = $this->get_order_identification($order);
+        $cedula = $this->normalize_identification_doc_id($cedulaRaw);
         if ($cedula === '') {
             if ($this->should_allow_test_identification_fallback($settings)) {
                 $cedula = '9999999999';
@@ -377,90 +422,112 @@ class UIX_DF_Rec_Plugin
         $billingCity = $order->get_billing_city() ?: $order->get_shipping_city();
         $billingStreet = $order->get_billing_address_1();
         $billingPostcode = $order->get_billing_postcode();
+        $shippingStreet = $order->get_shipping_address_1() ?: $billingStreet;
+        $shippingCountry = $order->get_shipping_country() ?: $billingCountry;
         $customerPhone = $order->get_billing_phone();
         $customerIp = $order->get_customer_ip_address();
 
-        if ($isTestMode) {
-            if (trim((string) $customerPhone) === '') {
-                $customerPhone = '0999999999';
-            }
-            if (trim((string) $billingStreet) === '') {
-                $billingStreet = 'N/A';
-            }
-            if (trim((string) $billingCity) === '') {
-                $billingCity = 'Quito';
-            }
-            if (trim((string) $billingState) === '') {
-                $billingState = 'Pichincha';
-            }
-            if (trim((string) $billingCountry) === '') {
-                $billingCountry = 'EC';
-            }
-            if (trim((string) $billingPostcode) === '') {
-                $billingPostcode = '170150';
-            }
+        if ($this->should_allow_test_identification_fallback($settings)) {
+            $customerPhone = trim((string) $customerPhone) !== '' ? $customerPhone : '0999999999';
+            $billingStreet = trim((string) $billingStreet) !== '' ? $billingStreet : 'N/A';
+            $billingCity = trim((string) $billingCity) !== '' ? $billingCity : 'Quito';
+            $billingState = trim((string) $billingState) !== '' ? $billingState : 'Pichincha';
+            $billingCountry = trim((string) $billingCountry) !== '' ? $billingCountry : 'EC';
+            $billingPostcode = trim((string) $billingPostcode) !== '' ? $billingPostcode : '170150';
+            $shippingStreet = trim((string) $shippingStreet) !== '' ? $shippingStreet : 'N/A';
+            $shippingCountry = trim((string) $shippingCountry) !== '' ? $shippingCountry : 'EC';
         }
 
-        // Validación de requeridos fuera de test mode.
-        if (!$isTestMode) {
-            $required = [
-                'customer.phone' => $customerPhone,
-                'billing.street1' => $billingStreet,
-                'billing.city' => $billingCity,
-                'billing.state' => $billingState,
-                'billing.country' => $billingCountry,
-                'billing.postcode' => $billingPostcode,
-                'customer.identificationDocId' => $cedula,
-                'customer.email' => $order->get_billing_email(),
-                'customer.givenName' => $order->get_billing_first_name(),
-                'customer.surname' => $order->get_billing_last_name(),
-            ];
-
-            $missing = [];
-            foreach ($required as $field => $value) {
-                if (trim((string) $value) === '') {
-                    $missing[] = $field;
-                }
-            }
-
-            if (!empty($missing)) {
-                $this->fail_wc_checkout_and_back($order, 'Missing required fields for Datafast checkout', [
-                    'order_id' => $orderId,
-                    'reason' => 'Campos faltantes: ' . implode(', ', $missing),
-                    'missing_fields' => $missing,
-                ]);
-            }
-        }
+        $amount = number_format((float) $order->get_total(), 2, '.', '');
+        $baseImp = number_format((float) ($order->get_total() - $order->get_total_tax()), 2, '.', '');
+        $tax = number_format((float) $order->get_total_tax(), 2, '.', '');
+        $merchantCustomerId = (string) ($order->get_customer_id() ?: $order->get_billing_email() ?: ('guest-' . $orderId));
+        $names = $this->resolve_customer_name_parts($order->get_billing_first_name(), $order->get_billing_last_name());
 
         $payload = [
             'entityId' => $settings['initial_entity_id'],
-            'amount' => number_format((float) $order->get_total(), 2, '.', ''),
+            'amount' => $amount,
             'currency' => $order->get_currency() ?: 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultUrl' => $returnUrl,
-            'customer.givenName' => $order->get_billing_first_name() ?: 'Cliente',
-            'customer.surname' => $order->get_billing_last_name() ?: 'Woo',
-            'customer.email' => $order->get_billing_email(),
-            'customer.phone' => $customerPhone,
+            'customer.givenName' => $names['given'],
+            'customer.middleName' => $names['middle'],
+            'customer.surname' => $names['surname'],
             'customer.ip' => $customerIp,
+            'customer.merchantCustomerId' => $merchantCustomerId,
+            'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
+            'customer.email' => $order->get_billing_email(),
             'customer.identificationDocType' => 'IDCARD',
             'customer.identificationDocId' => $cedula,
-            'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
-            'customParameters[SHOPPER_VERSIONDF]' => '2',
-            'customParameters[SHOPPER_CI]' => $cedula,
+            'customer.phone' => $customerPhone,
+            'shipping.street1' => $shippingStreet,
             'billing.street1' => $billingStreet,
+            'shipping.country' => $shippingCountry,
+            'billing.country' => $billingCountry,
             'billing.city' => $billingCity,
             'billing.state' => $billingState,
-            'billing.country' => $billingCountry,
             'billing.postcode' => $billingPostcode,
+            'customParameters[SHOPPER_VAL_BASE0]' => '0.00',
+            'customParameters[SHOPPER_VAL_BASEIMP]' => $baseImp,
+            'customParameters[SHOPPER_VAL_IVA]' => $tax,
+            'customParameters[SHOPPER_MID]' => $settings['shopper_mid'],
+            'customParameters[SHOPPER_TID]' => $settings['shopper_tid'],
+            'customParameters[SHOPPER_ECI]' => $settings['shopper_eci'],
+            'customParameters[SHOPPER_PSERV]' => $settings['shopper_pserv'],
+            'customParameters[SHOPPER_VERSIONDF]' => '2',
+            'customParameters[SHOPPER_CI]' => $cedula,
+            'risk.parameters[USER_DATA2]' => 'TheUIXstudio',
             'cart.items[0].name' => 'Orden WooCommerce #' . $orderId,
-            'cart.items[0].price' => number_format((float) $order->get_total(), 2, '.', ''),
+            'cart.items[0].price' => $amount,
             'cart.items[0].quantity' => '1',
-            'cart.items[0].tax' => number_format((float) $order->get_total_tax(), 2, '.', ''),
+            'cart.items[0].tax' => $tax,
         ];
 
         $payload = $this->remove_empty_payload_fields($payload);
+
+        $requiredKeys = [
+            'entityId',
+            'amount',
+            'currency',
+            'paymentType',
+            'createRegistration',
+            'customer.givenName',
+            'customer.middleName',
+            'customer.surname',
+            'customer.ip',
+            'customer.merchantCustomerId',
+            'merchantTransactionId',
+            'customer.email',
+            'customer.identificationDocType',
+            'customer.identificationDocId',
+            'customer.phone',
+            'shipping.street1',
+            'billing.street1',
+            'shipping.country',
+            'billing.country',
+            'customParameters[SHOPPER_VAL_BASE0]',
+            'customParameters[SHOPPER_VAL_BASEIMP]',
+            'customParameters[SHOPPER_VAL_IVA]',
+            'customParameters[SHOPPER_MID]',
+            'customParameters[SHOPPER_TID]',
+            'customParameters[SHOPPER_ECI]',
+            'customParameters[SHOPPER_PSERV]',
+            'customParameters[SHOPPER_VERSIONDF]',
+            'customParameters[SHOPPER_CI]',
+            'risk.parameters[USER_DATA2]',
+        ];
+
+        $missing = $this->validate_required_payload_fields($payload, $requiredKeys);
+        if (!empty($missing)) {
+            $this->fail_wc_checkout_and_back($order, 'Missing required fields for Datafast phase 2 checkout', [
+                'order_id' => $orderId,
+                'reason' => 'Campos faltantes: ' . implode(', ', $missing),
+                'missing_fields' => $missing,
+                'identification_raw' => $cedulaRaw,
+                'identification_normalized' => $cedula,
+                'payload' => $payload,
+            ]);
+        }
 
         if ($isTestMode) {
             $payload['testMode'] = 'EXTERNAL';
@@ -496,7 +563,7 @@ class UIX_DF_Rec_Plugin
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar orden</title></head><body>';
         echo '<h2>Finaliza tu pago</h2>';
         echo '<script src="' . esc_url($widgetJs) . '"></script>';
-        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '"></form>';
+        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '" data-create-registration="true"></form>';
         echo '<script src="https://www.datafast.com.ec/js/dfAdditionalValidations1.js"></script>';
         echo '</body></html>';
         exit;
@@ -640,6 +707,11 @@ class UIX_DF_Rec_Plugin
             'uix_df_default_max_retries',
             'uix_df_payment_brands',
             'uix_df_debug_enabled',
+            'uix_df_allow_test_placeholders',
+            'uix_df_shopper_mid',
+            'uix_df_shopper_tid',
+            'uix_df_shopper_eci',
+            'uix_df_shopper_pserv',
         ];
 
         foreach ($keys as $key) {
@@ -664,6 +736,11 @@ class UIX_DF_Rec_Plugin
                     <tr><th>Bearer Token</th><td><input class="regular-text" name="uix_df_initial_bearer_token" value="<?php echo esc_attr(get_option('uix_df_initial_bearer_token', '')); ?>"></td></tr>
                     <tr><th>Base URL</th><td><input class="regular-text" name="uix_df_initial_base_url" value="<?php echo esc_attr(get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com')); ?>"></td></tr>
                     <tr><th>Test mode</th><td><label><input type="checkbox" name="uix_df_initial_test_mode_enabled" value="1" <?php checked(get_option('uix_df_initial_test_mode_enabled', 1), 1); ?>> EXTERNAL</label></td></tr>
+                    <tr><th>Permitir placeholders test</th><td><label><input type="checkbox" name="uix_df_allow_test_placeholders" value="1" <?php checked(get_option('uix_df_allow_test_placeholders', 0), 1); ?>> Permite valores de relleno (solo para depuración)</label></td></tr>
+                    <tr><th>SHOPPER_MID</th><td><input class="regular-text" name="uix_df_shopper_mid" value="<?php echo esc_attr(get_option('uix_df_shopper_mid', '')); ?>"></td></tr>
+                    <tr><th>SHOPPER_TID</th><td><input class="regular-text" name="uix_df_shopper_tid" value="<?php echo esc_attr(get_option('uix_df_shopper_tid', '')); ?>"></td></tr>
+                    <tr><th>SHOPPER_ECI</th><td><input class="regular-text" name="uix_df_shopper_eci" value="<?php echo esc_attr(get_option('uix_df_shopper_eci', '')); ?>"></td></tr>
+                    <tr><th>SHOPPER_PSERV</th><td><input class="regular-text" name="uix_df_shopper_pserv" value="<?php echo esc_attr(get_option('uix_df_shopper_pserv', '')); ?>"></td></tr>
                     <tr><th>Marcas permitidas</th><td><input class="regular-text" name="uix_df_payment_brands" value="<?php echo esc_attr(get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER')); ?>"><p class="description">Separadas por espacio. Default sin ALIA por compatibilidad general.</p></td></tr>
                     <tr><th>Debug logs</th><td><label><input type="checkbox" name="uix_df_debug_enabled" value="1" <?php checked(get_option('uix_df_debug_enabled', 1), 1); ?>> Habilitar logs detallados</label></td></tr>
                 </table>
@@ -732,6 +809,11 @@ class UIX_DF_Rec_Plugin
             'recurring_test_mode_enabled' => (bool) get_option('uix_df_recurring_test_mode_enabled', 1),
             'payment_brands' => get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER'),
             'debug_enabled' => (bool) get_option('uix_df_debug_enabled', 1),
+            'allow_test_placeholders' => (bool) get_option('uix_df_allow_test_placeholders', 0),
+            'shopper_mid' => trim((string) get_option('uix_df_shopper_mid', '')),
+            'shopper_tid' => trim((string) get_option('uix_df_shopper_tid', '')),
+            'shopper_eci' => trim((string) get_option('uix_df_shopper_eci', '')),
+            'shopper_pserv' => trim((string) get_option('uix_df_shopper_pserv', '')),
         ];
     }
 }
