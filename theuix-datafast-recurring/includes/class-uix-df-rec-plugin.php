@@ -242,7 +242,10 @@ class UIX_DF_Rec_Plugin
             'currency' => 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
+            // En algunos comercios Datafast/Oppwa usa shopperResultUrl, en otros shopperResultURL.
+            // Enviamos ambos para máxima compatibilidad.
             'shopperResultUrl' => $returnUrl,
+            'shopperResultURL' => $returnUrl,
             'customer.givenName' => $nameParts[0] ?? $fullName,
             'customer.surname' => $nameParts[1] ?? 'Cliente',
             'customer.email' => $email,
@@ -352,9 +355,11 @@ class UIX_DF_Rec_Plugin
             'key' => $order->get_order_key(),
         ], home_url('/'));
 
-        $billingState = $order->get_billing_state() ?: ($order->get_shipping_state() ?: 'NA');
-        $billingCountry = $order->get_billing_country() ?: ($order->get_shipping_country() ?: 'EC');
-        $billingCity = $order->get_billing_city() ?: 'Quito';
+        $billingState = $order->get_billing_state() ?: $order->get_shipping_state();
+        $billingCountry = $order->get_billing_country() ?: $order->get_shipping_country();
+        $billingCity = $order->get_billing_city() ?: $order->get_shipping_city();
+        $billingStreet = $order->get_billing_address_1();
+        $billingPostcode = $order->get_billing_postcode();
 
         $payload = [
             'entityId' => $settings['initial_entity_id'],
@@ -362,26 +367,48 @@ class UIX_DF_Rec_Plugin
             'currency' => $order->get_currency() ?: 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
+            // Enviamos ambas variantes para compatibilidad entre integraciones.
             'shopperResultUrl' => $returnUrl,
+            'shopperResultURL' => $returnUrl,
             'customer.givenName' => $order->get_billing_first_name() ?: 'Cliente',
             'customer.surname' => $order->get_billing_last_name() ?: 'Woo',
             'customer.email' => $order->get_billing_email(),
-            'customer.phone' => $order->get_billing_phone(),
-            'customer.ip' => $order->get_customer_ip_address(),
             'customer.identificationDocType' => 'IDCARD',
             'customer.identificationDocId' => $cedula,
             'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
-            'billing.street1' => $order->get_billing_address_1(),
-            'billing.city' => $billingCity,
-            'billing.state' => $billingState,
-            'billing.country' => $billingCountry,
-            'billing.postcode' => $order->get_billing_postcode(),
             'customParameters[SHOPPER_VERSIONDF]' => '2',
             'cart.items[0].name' => 'Orden WooCommerce #' . $orderId,
             'cart.items[0].price' => number_format((float) $order->get_total(), 2, '.', ''),
             'cart.items[0].quantity' => '1',
             'cart.items[0].tax' => number_format((float) $order->get_total_tax(), 2, '.', ''),
         ];
+
+        // Campos adicionales "seguros": se agregan solo si tienen valor para evitar enviar vacíos
+        // que pueden disparar 200.300.404 (invalid or missing parameter).
+        $optionalPayload = [
+            'customer.phone' => $order->get_billing_phone(),
+            'customer.ip' => $order->get_customer_ip_address(),
+            'billing.street1' => $billingStreet,
+            'billing.city' => $billingCity,
+            'billing.state' => $billingState,
+            'billing.country' => $billingCountry,
+            'billing.postcode' => $billingPostcode,
+        ];
+
+        foreach ($optionalPayload as $field => $value) {
+            $value = is_string($value) ? trim($value) : $value;
+            if ($value !== '' && $value !== null) {
+                $payload[$field] = $value;
+            }
+        }
+
+        // Mínimos para billing cuando la orden viene con datos incompletos.
+        if (empty($payload['billing.country'])) {
+            $payload['billing.country'] = 'EC';
+        }
+        if (empty($payload['billing.city'])) {
+            $payload['billing.city'] = 'Quito';
+        }
 
         if (!empty($settings['initial_test_mode_enabled'])) {
             $payload['testMode'] = 'EXTERNAL';
