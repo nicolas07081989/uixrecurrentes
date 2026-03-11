@@ -39,10 +39,11 @@ class UIX_DF_Rec_Plugin
             $this->bootstrap_wc_gateway();
         }
 
+        add_filter('woocommerce_checkout_fields', [$this, 'add_checkout_identification_field']);
+        add_action('woocommerce_checkout_create_order', [$this, 'save_checkout_identification_field'], 20, 2);
+
         UIX_DF_Rec_DB::schedule_events();
     }
-
-
 
     public function maybe_show_woocommerce_notice()
     {
@@ -102,6 +103,70 @@ class UIX_DF_Rec_Plugin
         }
 
         return $methods;
+    }
+
+    public function add_checkout_identification_field($fields)
+    {
+        if (!isset($fields['billing'])) {
+            return $fields;
+        }
+
+        $fields['billing']['uix_df_cedula_ruc'] = [
+            'type' => 'text',
+            'label' => __('Cédula / RUC', 'uix-df-rec'),
+            'required' => true,
+            'class' => ['form-row-wide'],
+            'priority' => 125,
+            'clear' => true,
+        ];
+
+        return $fields;
+    }
+
+    public function save_checkout_identification_field($order, $data)
+    {
+        $cedula = '';
+
+        if (isset($data['uix_df_cedula_ruc'])) {
+            $cedula = sanitize_text_field(wp_unslash($data['uix_df_cedula_ruc']));
+        }
+
+        if ($cedula === '' && isset($_POST['uix_df_cedula_ruc'])) {
+            $cedula = sanitize_text_field(wp_unslash($_POST['uix_df_cedula_ruc']));
+        }
+
+        if ($cedula !== '') {
+            $order->update_meta_data('_uix_df_cedula_ruc', $cedula);
+        }
+    }
+
+    private function get_order_identification($order)
+    {
+        $cedula = trim((string) $order->get_meta('_uix_df_cedula_ruc'));
+        if ($cedula === '') {
+            $cedula = trim((string) $order->get_meta('df_cedula'));
+        }
+
+        return $cedula;
+    }
+
+    private function should_allow_test_identification_fallback(array $settings)
+    {
+        return !empty($settings['initial_test_mode_enabled']);
+    }
+
+    private function fail_wc_checkout_and_back($order, $message, array $logContext = [])
+    {
+        UIX_DF_Rec_Logger::error($message, $logContext);
+
+        if ($order && method_exists($order, 'add_order_note')) {
+            $note = isset($logContext['reason']) ? $logContext['reason'] : $message;
+            $order->add_order_note('Datafast checkout error: ' . wc_clean((string) $note));
+        }
+
+        wc_add_notice(__('No se pudo inicializar el pago con Datafast.', 'uix-df-rec'), 'error');
+        wp_safe_redirect($order->get_checkout_payment_url());
+        exit;
     }
 
     public function register_shortcode()
@@ -177,12 +242,13 @@ class UIX_DF_Rec_Plugin
             'currency' => 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultURL' => $returnUrl,
+            'shopperResultUrl' => $returnUrl,
             'customer.givenName' => $nameParts[0] ?? $fullName,
             'customer.surname' => $nameParts[1] ?? 'Cliente',
             'customer.email' => $email,
             'customer.identificationDocType' => 'IDCARD',
             'customer.identificationDocId' => $cedula,
+            'merchantTransactionId' => 'uixshort_' . $subscriptionId . '_' . gmdate('YmdHis'),
             'customParameters[SHOPPER_VERSIONDF]' => '2',
             'cart.items[0].name' => $planTitle,
             'cart.items[0].price' => $amount,
@@ -197,7 +263,13 @@ class UIX_DF_Rec_Plugin
         UIX_DF_Rec_Logger::info('Creating initial checkout (shortcode)', ['subscription_id' => $subscriptionId, 'payload' => $payload]);
         $response = $client->create_checkout($payload);
         if (!$response['ok'] || empty($response['body']['id'])) {
-            UIX_DF_Rec_Logger::error('Checkout creation failed (shortcode)', ['subscription_id' => $subscriptionId, 'response' => $response]);
+            UIX_DF_Rec_Logger::error('Checkout creation failed (shortcode)', [
+                'subscription_id' => $subscriptionId,
+                'status' => $response['status'] ?? 0,
+                'raw_body' => $response['raw_body'] ?? null,
+                'parsed_body' => $response['parsed_body'] ?? null,
+                'payload' => $payload,
+            ]);
             wp_die('No se pudo crear checkout. Revisa configuración Datafast.');
         }
 
@@ -214,7 +286,6 @@ class UIX_DF_Rec_Plugin
         echo '</body></html>';
         exit;
     }
-
 
     public function handle_wc_checkout()
     {
@@ -238,13 +309,29 @@ class UIX_DF_Rec_Plugin
             wp_die('Orden inválida (key)');
         }
 
+        $settings = $this->settings();
+
+        $cedula = $this->get_order_identification($order);
+        if ($cedula === '') {
+            if ($this->should_allow_test_identification_fallback($settings)) {
+                $cedula = '9999999999';
+                $order->add_order_note('Datafast test mode: usando cédula de fallback 9999999999 por falta de dato en orden.');
+                UIX_DF_Rec_Logger::info('Using test identification fallback', ['order_id' => $orderId]);
+            } else {
+                $this->fail_wc_checkout_and_back($order, 'Missing order identification', [
+                    'order_id' => $orderId,
+                    'reason' => 'Falta Cédula/RUC en la orden (_uix_df_cedula_ruc).',
+                ]);
+            }
+        }
+
         $subscriptionId = (int) $order->get_meta('_uix_df_subscription_id');
         if ($subscriptionId <= 0) {
             $fullName = trim($order->get_billing_first_name() . ' ' . $order->get_billing_last_name());
             $subscriptionId = $this->repo->create_pending([
                 'full_name' => $fullName ?: 'Cliente',
                 'email' => $order->get_billing_email(),
-                'cedula_ruc' => (string) $order->get_meta('df_cedula') ?: '9999999999',
+                'cedula_ruc' => $cedula,
                 'plan_slug' => 'woo-order-' . $orderId,
                 'plan_title' => 'Orden WooCommerce #' . $orderId,
                 'amount' => number_format((float) $order->get_total(), 2, '.', ''),
@@ -254,8 +341,8 @@ class UIX_DF_Rec_Plugin
             $order->save();
         }
 
-        $settings = $this->settings();
         UIX_DF_Rec_Logger::info('WC order checkout requested', ['order_id' => $orderId, 'order_total' => $order->get_total(), 'subscription_id' => $subscriptionId]);
+
         $client = new UIX_DF_Rec_Datafast_Client($settings);
 
         $returnUrl = add_query_arg([
@@ -265,19 +352,30 @@ class UIX_DF_Rec_Plugin
             'key' => $order->get_order_key(),
         ], home_url('/'));
 
+        $billingState = $order->get_billing_state() ?: ($order->get_shipping_state() ?: 'NA');
+        $billingCountry = $order->get_billing_country() ?: ($order->get_shipping_country() ?: 'EC');
+        $billingCity = $order->get_billing_city() ?: 'Quito';
+
         $payload = [
             'entityId' => $settings['initial_entity_id'],
             'amount' => number_format((float) $order->get_total(), 2, '.', ''),
             'currency' => $order->get_currency() ?: 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'shopperResultURL' => $returnUrl,
+            'shopperResultUrl' => $returnUrl,
             'customer.givenName' => $order->get_billing_first_name() ?: 'Cliente',
             'customer.surname' => $order->get_billing_last_name() ?: 'Woo',
             'customer.email' => $order->get_billing_email(),
+            'customer.phone' => $order->get_billing_phone(),
+            'customer.ip' => $order->get_customer_ip_address(),
             'customer.identificationDocType' => 'IDCARD',
-            'customer.identificationDocId' => (string) $order->get_meta('df_cedula') ?: '9999999999',
+            'customer.identificationDocId' => $cedula,
             'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
+            'billing.street1' => $order->get_billing_address_1(),
+            'billing.city' => $billingCity,
+            'billing.state' => $billingState,
+            'billing.country' => $billingCountry,
+            'billing.postcode' => $order->get_billing_postcode(),
             'customParameters[SHOPPER_VERSIONDF]' => '2',
             'cart.items[0].name' => 'Orden WooCommerce #' . $orderId,
             'cart.items[0].price' => number_format((float) $order->get_total(), 2, '.', ''),
@@ -292,16 +390,29 @@ class UIX_DF_Rec_Plugin
         UIX_DF_Rec_Logger::info('Creating initial checkout (Woo order)', ['order_id' => $orderId, 'subscription_id' => $subscriptionId, 'payload' => $payload]);
         $response = $client->create_checkout($payload);
         if (!$response['ok'] || empty($response['body']['id'])) {
-            UIX_DF_Rec_Logger::error('WC checkout creation failed', ['order_id' => $orderId, 'subscription_id' => $subscriptionId, 'response' => $response]);
-            wc_add_notice(__('No se pudo inicializar el pago con Datafast.', 'uix-df-rec'), 'error');
-            wp_safe_redirect($order->get_checkout_payment_url());
-            exit;
+            $reason = $response['body']['result']['description'] ?? ($response['error'] ?? 'Error desconocido');
+            $this->fail_wc_checkout_and_back($order, 'WC checkout creation failed', [
+                'order_id' => $orderId,
+                'subscription_id' => $subscriptionId,
+                'status' => $response['status'] ?? 0,
+                'reason' => $reason,
+                'raw_body' => $response['raw_body'] ?? null,
+                'parsed_body' => $response['parsed_body'] ?? null,
+                'payload' => $payload,
+            ]);
         }
 
         $checkoutId = $response['body']['id'];
         $this->repo->update_checkout($subscriptionId, $checkoutId);
 
         $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
+
+        UIX_DF_Rec_Logger::info('Rendering Datafast hosted widget', [
+            'order_id' => $orderId,
+            'subscription_id' => $subscriptionId,
+            'checkout_id' => $checkoutId,
+            'widget_js' => $widgetJs,
+        ]);
 
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar orden</title></head><body>';
         echo '<h2>Finaliza tu pago</h2>';
@@ -408,7 +519,7 @@ class UIX_DF_Rec_Plugin
                 $payload['testMode'] = 'EXTERNAL';
             }
 
-            UIX_DF_Rec_Logger::info('Recurring charge attempt', ['subscription_id' => (int)$sub['id'], 'status' => $sub['status'], 'next_charge_at' => $sub['next_charge_at']]);
+            UIX_DF_Rec_Logger::info('Recurring charge attempt', ['subscription_id' => (int) $sub['id'], 'status' => $sub['status'], 'next_charge_at' => $sub['next_charge_at']]);
             $response = $client->recurring_payment($sub['registration_id'], $payload);
             $body = $response['body'] ?? [];
 

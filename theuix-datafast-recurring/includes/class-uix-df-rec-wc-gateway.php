@@ -54,6 +54,12 @@ class UIX_DF_Rec_WC_Gateway extends WC_Payment_Gateway
     {
         $order = wc_get_order($order_id);
 
+        UIX_DF_Rec_Logger::info('WC gateway process_payment', [
+            'order_id' => $order_id,
+            'order_key' => $order ? $order->get_order_key() : null,
+            'total' => $order ? $order->get_total() : null,
+        ]);
+
         return [
             'result' => 'success',
             'redirect' => add_query_arg([

@@ -48,7 +48,6 @@ class UIX_DF_Rec_Datafast_Client
         return $this->request('POST', $url, $payload, 'recurring');
     }
 
-
     private function normalized_auth_header($mode)
     {
         $token = $this->token($mode);
@@ -77,22 +76,48 @@ class UIX_DF_Rec_Datafast_Client
             $args['body'] = http_build_query($payload);
         }
 
-        UIX_DF_Rec_Logger::info('Datafast request', ['method' => $method, 'url' => $url, 'mode' => $mode, 'payload' => $payload]);
+        UIX_DF_Rec_Logger::info('Datafast request', [
+            'method' => $method,
+            'url' => $url,
+            'mode' => $mode,
+            'payload' => $payload,
+        ]);
 
         $response = wp_remote_request($url, $args);
 
         if (is_wp_error($response)) {
-            UIX_DF_Rec_Logger::error('Datafast wp_remote_request error', ['mode' => $mode, 'error' => $response->get_error_message()]);
-            return ['ok' => false, 'error' => $response->get_error_message(), 'status' => 0, 'body' => null];
+            UIX_DF_Rec_Logger::error('Datafast wp_remote_request error', [
+                'mode' => $mode,
+                'error' => $response->get_error_message(),
+            ]);
+
+            return [
+                'ok' => false,
+                'error' => $response->get_error_message(),
+                'status' => 0,
+                'body' => null,
+                'parsed_body' => null,
+                'raw_body' => null,
+            ];
         }
 
-        $rawBody = wp_remote_retrieve_body($response);
-        $body = json_decode($rawBody, true);
-        UIX_DF_Rec_Logger::info('Datafast response', ['mode' => $mode, 'status' => (int) wp_remote_retrieve_response_code($response), 'body' => is_array($body) ? $body : $rawBody]);
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $rawBody = (string) wp_remote_retrieve_body($response);
+        $parsedBody = json_decode($rawBody, true);
+
+        UIX_DF_Rec_Logger::info('Datafast response', [
+            'mode' => $mode,
+            'status' => $status,
+            'parsed_body' => is_array($parsedBody) ? $parsedBody : null,
+            'raw_body' => $rawBody,
+        ]);
+
         return [
             'ok' => true,
-            'status' => (int) wp_remote_retrieve_response_code($response),
-            'body' => is_array($body) ? $body : [],
+            'status' => $status,
+            'body' => is_array($parsedBody) ? $parsedBody : [],
+            'parsed_body' => is_array($parsedBody) ? $parsedBody : [],
+            'raw_body' => $rawBody,
         ];
     }
 }
