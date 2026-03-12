@@ -223,6 +223,34 @@ class UIX_DF_Rec_Plugin
         return $clean;
     }
 
+    private function validate_initial_checkout_settings(array $settings)
+    {
+        $required = [
+            'initial_entity_id' => $settings['initial_entity_id'] ?? '',
+            'initial_bearer_token' => $settings['initial_bearer_token'] ?? '',
+            'initial_base_url' => $settings['initial_base_url'] ?? '',
+        ];
+
+        $missing = [];
+        foreach ($required as $key => $value) {
+            if (trim((string) $value) === '') {
+                $missing[] = $key;
+            }
+        }
+
+        return $missing;
+    }
+
+    private function checkout_notice_message_from_context($defaultMessage, array $logContext = [])
+    {
+        $reason = isset($logContext['reason']) ? trim((string) $logContext['reason']) : '';
+        if ($reason === '') {
+            return $defaultMessage;
+        }
+
+        return $defaultMessage . ' ' . sprintf(__('Detalle: %s', 'uix-df-rec'), wc_clean($reason));
+    }
+
     private function fail_wc_checkout_and_back($order, $message, array $logContext = [])
     {
         UIX_DF_Rec_Logger::error($message, $logContext);
@@ -232,7 +260,7 @@ class UIX_DF_Rec_Plugin
             $order->add_order_note('Datafast checkout error: ' . wc_clean((string) $note));
         }
 
-        wc_add_notice(__('No se pudo inicializar el pago con Datafast.', 'uix-df-rec'), 'error');
+        wc_add_notice($this->checkout_notice_message_from_context(__('No se pudo inicializar el pago con Datafast.', 'uix-df-rec'), $logContext), 'error');
         wp_safe_redirect($order->get_checkout_payment_url());
         exit;
     }
@@ -377,6 +405,15 @@ class UIX_DF_Rec_Plugin
         }
 
         $settings = $this->settings();
+
+        $missingSettings = $this->validate_initial_checkout_settings($settings);
+        if (!empty($missingSettings)) {
+            $this->fail_wc_checkout_and_back($order, 'Missing required Datafast initial settings', [
+                'order_id' => $orderId,
+                'reason' => 'Configuración incompleta: ' . implode(', ', $missingSettings),
+                'missing_settings' => $missingSettings,
+            ]);
+        }
 
         $cedulaRaw = $this->get_order_identification($order);
         $cedula = $this->normalize_identification_doc_id($cedulaRaw);
