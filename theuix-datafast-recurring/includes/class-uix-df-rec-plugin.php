@@ -282,6 +282,39 @@ class UIX_DF_Rec_Plugin
         return $defaultMessage . ' ' . sprintf(__('Detalle: %s', 'uix-df-rec'), wc_clean($reason));
     }
 
+    private function sanitize_token_for_transport($token)
+    {
+        return preg_replace('/\s+/', '', trim((string) $token));
+    }
+
+    private function build_auth_troubleshooting_hint(array $settings, $reason)
+    {
+        $reason = strtolower(trim((string) $reason));
+        if ($reason === '' || strpos($reason, 'invalid authentication information') === false) {
+            return '';
+        }
+
+        $baseUrl = trim((string) ($settings['initial_base_url'] ?? ''));
+        $entityId = trim((string) ($settings['initial_entity_id'] ?? ''));
+        $token = $this->sanitize_token_for_transport($settings['initial_bearer_token'] ?? '');
+
+        $hints = [];
+        $hints[] = 'Credenciales iniciales inválidas para este ambiente';
+        $hints[] = 'verifica que Entity ID y Bearer Token sean del mismo canal';
+        $hints[] = 'si estás en pruebas usa credenciales de TEST emitidas por Datafast';
+        if (stripos($baseUrl, 'test') !== false && empty($settings['initial_test_mode_enabled'])) {
+            $hints[] = 'activa Test mode=EXTERNAL en ambiente de pruebas';
+        }
+        if ($token !== trim((string) ($settings['initial_bearer_token'] ?? ''))) {
+            $hints[] = 'se detectaron espacios/saltos de línea en el token, vuelve a pegarlo limpio';
+        }
+        if ($entityId === '' || $token === '') {
+            $hints[] = 'faltan credenciales en UIX Recurrentes > Primer pago';
+        }
+
+        return implode('. ', $hints) . '.';
+    }
+
     private function fail_wc_checkout_and_back($order, $message, array $logContext = [])
     {
         UIX_DF_Rec_Logger::error($message, $logContext);
@@ -636,11 +669,13 @@ class UIX_DF_Rec_Plugin
         $response = $client->create_checkout($payload);
         if (!$response['ok'] || empty($response['body']['id'])) {
             $reason = $response['body']['result']['description'] ?? ($response['error'] ?? 'Error desconocido');
+            $hint = $this->build_auth_troubleshooting_hint($settings, $reason);
+            $reasonWithHint = $hint !== '' ? ($reason . '. ' . $hint) : $reason;
             $this->fail_wc_checkout_and_back($order, 'WC checkout creation failed', [
                 'order_id' => $orderId,
                 'subscription_id' => $subscriptionId,
                 'status' => $response['status'] ?? 0,
-                'reason' => $reason,
+                'reason' => $reasonWithHint,
                 'raw_body' => $response['raw_body'] ?? null,
                 'parsed_body' => $response['parsed_body'] ?? null,
                 'payload' => $payload,
@@ -924,11 +959,11 @@ class UIX_DF_Rec_Plugin
     {
         return [
             'initial_entity_id' => get_option('uix_df_initial_entity_id', ''),
-            'initial_bearer_token' => get_option('uix_df_initial_bearer_token', ''),
+            'initial_bearer_token' => $this->sanitize_token_for_transport(get_option('uix_df_initial_bearer_token', '')),
             'initial_base_url' => get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com'),
             'initial_test_mode_enabled' => (bool) get_option('uix_df_initial_test_mode_enabled', 1),
             'recurring_entity_id' => get_option('uix_df_recurring_entity_id', ''),
-            'recurring_bearer_token' => get_option('uix_df_recurring_bearer_token', ''),
+            'recurring_bearer_token' => $this->sanitize_token_for_transport(get_option('uix_df_recurring_bearer_token', '')),
             'recurring_base_url' => get_option('uix_df_recurring_base_url', 'https://eu-test.oppwa.com'),
             'recurring_test_mode_enabled' => (bool) get_option('uix_df_recurring_test_mode_enabled', 1),
             'payment_brands' => get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER'),
