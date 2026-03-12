@@ -25,6 +25,7 @@ class UIX_DF_Rec_Plugin
         add_action('init', [$this, 'register_shortcode']);
         add_action('admin_post_nopriv_uix_df_create_checkout', [$this, 'handle_create_checkout']);
         add_action('admin_post_uix_df_create_checkout', [$this, 'handle_create_checkout']);
+        add_action('admin_post_uix_df_test_initial_credentials', [$this, 'handle_test_initial_credentials']);
         add_action('template_redirect', [$this, 'handle_wc_checkout']);
         add_action('template_redirect', [$this, 'handle_return']);
 
@@ -822,6 +823,73 @@ class UIX_DF_Rec_Plugin
         }
     }
 
+
+    public function handle_test_initial_credentials()
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('No autorizado');
+        }
+
+        check_admin_referer('uix_df_test_initial_credentials', 'uix_df_test_nonce');
+
+        $settings = $this->settings();
+        $adminUrl = admin_url('admin.php?page=uix-df-rec');
+
+        $missingSettings = $this->validate_initial_checkout_settings($settings);
+        if (!empty($missingSettings)) {
+            wp_safe_redirect(add_query_arg([
+                'uix_df_probe' => 1,
+                'uix_df_probe_status' => 'error',
+                'uix_df_probe_message' => rawurlencode('Configuración incompleta: ' . implode(', ', $missingSettings)),
+            ], $adminUrl));
+            exit;
+        }
+
+        $client = new UIX_DF_Rec_Datafast_Client($settings);
+        $payload = [
+            'entityId' => $settings['initial_entity_id'],
+            'amount' => '1.00',
+            'currency' => 'USD',
+            'paymentType' => 'DB',
+            'merchantTransactionId' => 'uix_probe_' . gmdate('YmdHis'),
+        ];
+
+        if (!empty($settings['initial_test_mode_enabled'])) {
+            $payload['testMode'] = 'EXTERNAL';
+        }
+
+        $response = $client->create_checkout($payload);
+
+        if (!empty($response['ok']) && !empty($response['body']['id'])) {
+            $message = 'Credenciales válidas. CheckoutId de prueba: ' . $response['body']['id'];
+            wp_safe_redirect(add_query_arg([
+                'uix_df_probe' => 1,
+                'uix_df_probe_status' => 'success',
+                'uix_df_probe_message' => rawurlencode($message),
+            ], $adminUrl));
+            exit;
+        }
+
+        $reason = '';
+        if (!empty($response['body']['result']['description'])) {
+            $reason = (string) $response['body']['result']['description'];
+        } elseif (!empty($response['error'])) {
+            $reason = (string) $response['error'];
+        } else {
+            $reason = 'No se pudo validar credenciales.';
+        }
+
+        $hint = $this->build_auth_troubleshooting_hint($settings, $reason);
+        $fullMessage = $hint !== '' ? ($reason . '. ' . $hint) : $reason;
+
+        wp_safe_redirect(add_query_arg([
+            'uix_df_probe' => 1,
+            'uix_df_probe_status' => 'error',
+            'uix_df_probe_message' => rawurlencode($fullMessage),
+        ], $adminUrl));
+        exit;
+    }
+
     public function register_admin_menu()
     {
         add_menu_page('UIX Recurrentes', 'UIX Recurrentes', 'manage_options', 'uix-df-rec', [$this, 'render_settings_page']);
@@ -865,9 +933,18 @@ class UIX_DF_Rec_Plugin
         $settings = $this->settings();
         $health = $this->get_initial_checkout_health_report($settings);
 
+        $probeStatus = isset($_GET['uix_df_probe_status']) ? sanitize_text_field(wp_unslash($_GET['uix_df_probe_status'])) : '';
+        $probeMessage = isset($_GET['uix_df_probe_message']) ? sanitize_text_field(rawurldecode(wp_unslash($_GET['uix_df_probe_message']))) : '';
+
         ?>
         <div class="wrap">
             <h1>UIX Datafast Recurrentes</h1>
+
+            <?php if ($probeStatus === 'success' && $probeMessage !== '') : ?>
+                <div class="notice notice-success"><p><strong>Prueba de credenciales:</strong> <?php echo esc_html($probeMessage); ?></p></div>
+            <?php elseif ($probeStatus === 'error' && $probeMessage !== '') : ?>
+                <div class="notice notice-error"><p><strong>Prueba de credenciales:</strong> <?php echo esc_html($probeMessage); ?></p></div>
+            <?php endif; ?>
 
             <h2>Estado de configuración (checkout inicial)</h2>
             <?php if (empty($health['critical_missing'])) : ?>
@@ -914,6 +991,15 @@ class UIX_DF_Rec_Plugin
                 </table>
                 <?php submit_button(); ?>
             </form>
+
+            <h2>Probar credenciales ahora</h2>
+            <p>Ejecuta una prueba rápida contra <code>/v1/checkouts</code> con monto mínimo para verificar autenticación y ambiente.</p>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="uix_df_test_initial_credentials">
+                <?php wp_nonce_field('uix_df_test_initial_credentials', 'uix_df_test_nonce'); ?>
+                <?php submit_button('Probar credenciales ahora', 'secondary', 'submit', false); ?>
+            </form>
+
             <p>Shortcode: <code>[uix_subscribe_form plan="plan-pro" title="Plan Pro" amount="49.00"]</code></p>
         </div>
         <?php
