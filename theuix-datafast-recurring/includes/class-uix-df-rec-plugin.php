@@ -160,6 +160,11 @@ class UIX_DF_Rec_Plugin
         return !empty($settings['strict_phase2_required']);
     }
 
+    private function is_initial_phase2_mode(array $settings)
+    {
+        return ($settings['initial_integration_phase'] ?? 'phase1') === 'phase2';
+    }
+
     private function normalize_identification_doc_id($value)
     {
         $digitsOnly = preg_replace('/\D+/', '', (string) $value);
@@ -263,6 +268,7 @@ class UIX_DF_Rec_Plugin
             'critical_missing' => $criticalMissing,
             'recommended_missing' => $recommendedMissing,
             'strict_phase2_required' => !empty($settings['strict_phase2_required']),
+            'initial_integration_phase' => $settings['initial_integration_phase'] ?? 'phase1',
         ];
     }
 
@@ -513,6 +519,7 @@ class UIX_DF_Rec_Plugin
         $tax = number_format((float) $order->get_total_tax(), 2, '.', '');
         $merchantCustomerId = (string) ($order->get_customer_id() ?: $order->get_billing_email() ?: ('guest-' . $orderId));
         $names = $this->resolve_customer_name_parts($order->get_billing_first_name(), $order->get_billing_last_name());
+        $phase2Mode = $this->is_initial_phase2_mode($settings);
 
         $payload = [
             'entityId' => $settings['initial_entity_id'],
@@ -520,98 +527,105 @@ class UIX_DF_Rec_Plugin
             'currency' => $order->get_currency() ?: 'USD',
             'paymentType' => 'DB',
             'createRegistration' => 'true',
-            'customer.givenName' => $names['given'],
-            'customer.middleName' => $names['middle'],
-            'customer.surname' => $names['surname'],
-            'customer.ip' => $customerIp,
-            'customer.merchantCustomerId' => $merchantCustomerId,
             'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
-            'customer.email' => $order->get_billing_email(),
-            'customer.identificationDocType' => 'IDCARD',
-            'customer.identificationDocId' => $cedula,
-            'customer.phone' => $customerPhone,
-            'shipping.street1' => $shippingStreet,
-            'billing.street1' => $billingStreet,
-            'shipping.country' => $shippingCountry,
-            'billing.country' => $billingCountry,
-            'billing.city' => $billingCity,
-            'billing.state' => $billingState,
-            'billing.postcode' => $billingPostcode,
-            'customParameters[SHOPPER_VAL_BASE0]' => '0.00',
-            'customParameters[SHOPPER_VAL_BASEIMP]' => $baseImp,
-            'customParameters[SHOPPER_VAL_IVA]' => $tax,
-            'customParameters[SHOPPER_MID]' => $settings['shopper_mid'],
-            'customParameters[SHOPPER_TID]' => $settings['shopper_tid'],
-            'customParameters[SHOPPER_ECI]' => $settings['shopper_eci'],
-            'customParameters[SHOPPER_PSERV]' => $settings['shopper_pserv'],
-            'customParameters[SHOPPER_VERSIONDF]' => '2',
-            'customParameters[SHOPPER_CI]' => $cedula,
-            'risk.parameters[USER_DATA2]' => 'TheUIXstudio',
-            'cart.items[0].name' => 'Orden WooCommerce #' . $orderId,
-            'cart.items[0].price' => $amount,
-            'cart.items[0].quantity' => '1',
-            'cart.items[0].tax' => $tax,
         ];
+
+        if ($phase2Mode) {
+            $payload = array_merge($payload, [
+                'customer.givenName' => $names['given'],
+                'customer.middleName' => $names['middle'],
+                'customer.surname' => $names['surname'],
+                'customer.ip' => $customerIp,
+                'customer.merchantCustomerId' => $merchantCustomerId,
+                'customer.email' => $order->get_billing_email(),
+                'customer.identificationDocType' => 'IDCARD',
+                'customer.identificationDocId' => $cedula,
+                'customer.phone' => $customerPhone,
+                'shipping.street1' => $shippingStreet,
+                'billing.street1' => $billingStreet,
+                'shipping.country' => $shippingCountry,
+                'billing.country' => $billingCountry,
+                'billing.city' => $billingCity,
+                'billing.state' => $billingState,
+                'billing.postcode' => $billingPostcode,
+                'customParameters[SHOPPER_VAL_BASE0]' => '0.00',
+                'customParameters[SHOPPER_VAL_BASEIMP]' => $baseImp,
+                'customParameters[SHOPPER_VAL_IVA]' => $tax,
+                'customParameters[SHOPPER_MID]' => $settings['shopper_mid'],
+                'customParameters[SHOPPER_TID]' => $settings['shopper_tid'],
+                'customParameters[SHOPPER_ECI]' => $settings['shopper_eci'],
+                'customParameters[SHOPPER_PSERV]' => $settings['shopper_pserv'],
+                'customParameters[SHOPPER_VERSIONDF]' => '2',
+                'customParameters[SHOPPER_CI]' => $cedula,
+                'risk.parameters[USER_DATA2]' => 'TheUIXstudio',
+                'cart.items[0].name' => 'Orden WooCommerce #' . $orderId,
+                'cart.items[0].price' => $amount,
+                'cart.items[0].quantity' => '1',
+                'cart.items[0].tax' => $tax,
+            ]);
+        }
 
         $payload = $this->remove_empty_payload_fields($payload);
 
-        $requiredKeys = [
-            'entityId',
-            'amount',
-            'currency',
-            'paymentType',
-            'createRegistration',
-            'customer.givenName',
-            'customer.middleName',
-            'customer.surname',
-            'customer.ip',
-            'customer.merchantCustomerId',
-            'merchantTransactionId',
-            'customer.email',
-            'customer.identificationDocType',
-            'customer.identificationDocId',
-            'customer.phone',
-            'shipping.street1',
-            'billing.street1',
-            'shipping.country',
-            'billing.country',
-            'customParameters[SHOPPER_VAL_BASE0]',
-            'customParameters[SHOPPER_VAL_BASEIMP]',
-            'customParameters[SHOPPER_VAL_IVA]',
-            'customParameters[SHOPPER_VERSIONDF]',
-            'customParameters[SHOPPER_CI]',
-            'risk.parameters[USER_DATA2]',
-        ];
+        if ($phase2Mode) {
+            $requiredKeys = [
+                'entityId',
+                'amount',
+                'currency',
+                'paymentType',
+                'createRegistration',
+                'customer.givenName',
+                'customer.middleName',
+                'customer.surname',
+                'customer.ip',
+                'customer.merchantCustomerId',
+                'merchantTransactionId',
+                'customer.email',
+                'customer.identificationDocType',
+                'customer.identificationDocId',
+                'customer.phone',
+                'shipping.street1',
+                'billing.street1',
+                'shipping.country',
+                'billing.country',
+                'customParameters[SHOPPER_VAL_BASE0]',
+                'customParameters[SHOPPER_VAL_BASEIMP]',
+                'customParameters[SHOPPER_VAL_IVA]',
+                'customParameters[SHOPPER_VERSIONDF]',
+                'customParameters[SHOPPER_CI]',
+                'risk.parameters[USER_DATA2]',
+            ];
 
-        if ($this->should_enforce_strict_phase2_required_fields($settings)) {
-            $requiredKeys = array_merge($requiredKeys, [
-                'customParameters[SHOPPER_MID]',
-                'customParameters[SHOPPER_TID]',
-                'customParameters[SHOPPER_ECI]',
-                'customParameters[SHOPPER_PSERV]',
-            ]);
-        }
+            if ($this->should_enforce_strict_phase2_required_fields($settings)) {
+                $requiredKeys = array_merge($requiredKeys, [
+                    'customParameters[SHOPPER_MID]',
+                    'customParameters[SHOPPER_TID]',
+                    'customParameters[SHOPPER_ECI]',
+                    'customParameters[SHOPPER_PSERV]',
+                ]);
+            }
 
-        $missing = $this->validate_required_payload_fields($payload, $requiredKeys);
-        if (!empty($missing)) {
-            $this->fail_wc_checkout_and_back($order, 'Missing required fields for Datafast phase 2 checkout', [
-                'order_id' => $orderId,
-                'reason' => 'Campos faltantes: ' . implode(', ', $missing),
-                'missing_fields' => $missing,
-                'identification_raw' => $cedulaRaw,
-                'identification_normalized' => $cedula,
-                'payload' => $payload,
-            ]);
-        }
+            $missing = $this->validate_required_payload_fields($payload, $requiredKeys);
+            if (!empty($missing)) {
+                $this->fail_wc_checkout_and_back($order, 'Missing required fields for Datafast phase 2 checkout', [
+                    'order_id' => $orderId,
+                    'reason' => 'Campos faltantes: ' . implode(', ', $missing),
+                    'missing_fields' => $missing,
+                    'identification_raw' => $cedulaRaw,
+                    'identification_normalized' => $cedula,
+                    'payload' => $payload,
+                ]);
+            }
 
-        $optionalShopperKeys = ['customParameters[SHOPPER_MID]', 'customParameters[SHOPPER_TID]', 'customParameters[SHOPPER_ECI]', 'customParameters[SHOPPER_PSERV]'];
-        $missingOptionalShopper = $this->validate_required_payload_fields($payload, $optionalShopperKeys);
-        if (!empty($missingOptionalShopper) && !$this->should_enforce_strict_phase2_required_fields($settings)) {
-            UIX_DF_Rec_Logger::info('Datafast checkout continuing without optional SHOPPER_* parameters', [
-                'order_id' => $orderId,
-                'missing_optional_shopper' => $missingOptionalShopper,
-            ]);
-            $order->add_order_note('Datafast: checkout enviado sin algunos SHOPPER_* opcionales: ' . implode(', ', $missingOptionalShopper));
+            $optionalShopperKeys = ['customParameters[SHOPPER_MID]', 'customParameters[SHOPPER_TID]', 'customParameters[SHOPPER_ECI]', 'customParameters[SHOPPER_PSERV]'];
+            $missingOptionalShopper = $this->validate_required_payload_fields($payload, $optionalShopperKeys);
+            if (!empty($missingOptionalShopper) && !$this->should_enforce_strict_phase2_required_fields($settings)) {
+                UIX_DF_Rec_Logger::info('Datafast checkout continuing without optional SHOPPER_* parameters', [
+                    'order_id' => $orderId,
+                    'missing_optional_shopper' => $missingOptionalShopper,
+                ]);
+                $order->add_order_note('Datafast: checkout enviado sin algunos SHOPPER_* opcionales: ' . implode(', ', $missingOptionalShopper));
+            }
         }
 
         if ($isTestMode) {
@@ -798,6 +812,7 @@ class UIX_DF_Rec_Plugin
             'uix_df_shopper_eci',
             'uix_df_shopper_pserv',
             'uix_df_strict_phase2_required',
+            'uix_df_initial_integration_phase',
         ];
 
         foreach ($keys as $key) {
@@ -832,6 +847,7 @@ class UIX_DF_Rec_Plugin
             <?php if (!empty($health['strict_phase2_required'])) : ?>
                 <p><em>Validación estricta phase-2 está ACTIVA: los campos SHOPPER_* recomendados se tratan como obligatorios.</em></p>
             <?php endif; ?>
+            <p><em>Modo actual de integración inicial: <strong><?php echo esc_html($health['initial_integration_phase']); ?></strong></em></p>
 
             <form method="post" action="options.php">
                 <?php settings_fields('uix_df_rec_settings'); ?>
@@ -841,6 +857,7 @@ class UIX_DF_Rec_Plugin
                     <tr><th>Bearer Token</th><td><input class="regular-text" name="uix_df_initial_bearer_token" value="<?php echo esc_attr(get_option('uix_df_initial_bearer_token', '')); ?>"></td></tr>
                     <tr><th>Base URL</th><td><input class="regular-text" name="uix_df_initial_base_url" value="<?php echo esc_attr(get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com')); ?>"></td></tr>
                     <tr><th>Test mode</th><td><label><input type="checkbox" name="uix_df_initial_test_mode_enabled" value="1" <?php checked(get_option('uix_df_initial_test_mode_enabled', 1), 1); ?>> EXTERNAL</label></td></tr>
+                    <tr><th>Modo de integración inicial</th><td><select name="uix_df_initial_integration_phase"><option value="phase1" <?php selected(get_option('uix_df_initial_integration_phase', 'phase1'), 'phase1'); ?>>Fase 1 (mínima, obtener checkoutId y mostrar formulario)</option><option value="phase2" <?php selected(get_option('uix_df_initial_integration_phase', 'phase1'), 'phase2'); ?>>Fase 2 (campos completos requeridos por Datafast)</option></select></td></tr>
                     <tr><th>Permitir placeholders test</th><td><label><input type="checkbox" name="uix_df_allow_test_placeholders" value="1" <?php checked(get_option('uix_df_allow_test_placeholders', 0), 1); ?>> Permite valores de relleno (solo para depuración)</label></td></tr>
                     <tr><th>SHOPPER_MID</th><td><input class="regular-text" name="uix_df_shopper_mid" value="<?php echo esc_attr(get_option('uix_df_shopper_mid', '')); ?>"></td></tr>
                     <tr><th>SHOPPER_TID</th><td><input class="regular-text" name="uix_df_shopper_tid" value="<?php echo esc_attr(get_option('uix_df_shopper_tid', '')); ?>"></td></tr>
@@ -921,6 +938,7 @@ class UIX_DF_Rec_Plugin
             'shopper_eci' => trim((string) get_option('uix_df_shopper_eci', '')),
             'shopper_pserv' => trim((string) get_option('uix_df_shopper_pserv', '')),
             'strict_phase2_required' => (bool) get_option('uix_df_strict_phase2_required', 0),
+            'initial_integration_phase' => get_option('uix_df_initial_integration_phase', 'phase1'),
         ];
     }
 }
