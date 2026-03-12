@@ -436,6 +436,7 @@ class UIX_DF_Rec_Plugin
         }
 
         $settings = $this->settings();
+        $phase2Mode = $this->is_initial_phase2_mode($settings);
 
         $missingSettings = $this->validate_initial_checkout_settings($settings);
         if (!empty($missingSettings)) {
@@ -448,7 +449,7 @@ class UIX_DF_Rec_Plugin
 
         $cedulaRaw = $this->get_order_identification($order);
         $cedula = $this->normalize_identification_doc_id($cedulaRaw);
-        if ($cedula === '') {
+        if ($phase2Mode && $cedula === '') {
             if ($this->should_allow_test_identification_fallback($settings)) {
                 $cedula = '9999999999';
                 $order->add_order_note('Datafast test mode: usando cédula de fallback 9999999999 por falta de dato en orden.');
@@ -519,7 +520,6 @@ class UIX_DF_Rec_Plugin
         $tax = number_format((float) $order->get_total_tax(), 2, '.', '');
         $merchantCustomerId = (string) ($order->get_customer_id() ?: $order->get_billing_email() ?: ('guest-' . $orderId));
         $names = $this->resolve_customer_name_parts($order->get_billing_first_name(), $order->get_billing_last_name());
-        $phase2Mode = $this->is_initial_phase2_mode($settings);
 
         $payload = [
             'entityId' => $settings['initial_entity_id'],
@@ -757,6 +757,7 @@ class UIX_DF_Rec_Plugin
                 'amount' => number_format((float) $sub['amount'], 2, '.', ''),
                 'currency' => 'USD',
                 'paymentType' => 'DB',
+                'recurringType' => 'REPEATED',
                 'risk.parameters[USER_DATA1]' => 'REPEATED',
             ];
 
