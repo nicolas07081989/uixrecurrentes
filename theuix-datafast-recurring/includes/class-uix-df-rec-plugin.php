@@ -316,6 +316,61 @@ class UIX_DF_Rec_Plugin
         return implode('. ', $hints) . '.';
     }
 
+    private function is_invalid_auth_response(array $response)
+    {
+        $description = '';
+        if (!empty($response['body']['result']['description'])) {
+            $description = (string) $response['body']['result']['description'];
+        } elseif (!empty($response['error'])) {
+            $description = (string) $response['error'];
+        }
+
+        return stripos($description, 'invalid authentication information') !== false;
+    }
+
+    private function alternate_initial_base_url($baseUrl)
+    {
+        $baseUrl = trim((string) $baseUrl);
+        if (stripos($baseUrl, 'eu-test.oppwa.com') !== false) {
+            return 'https://test.oppwa.com';
+        }
+        if (stripos($baseUrl, 'test.oppwa.com') !== false) {
+            return 'https://eu-test.oppwa.com';
+        }
+
+        return '';
+    }
+
+    private function create_initial_checkout_with_endpoint_fallback(array $settings, array $payload)
+    {
+        $client = new UIX_DF_Rec_Datafast_Client($settings);
+        $response = $client->create_checkout($payload);
+
+        $fallbackUsed = false;
+        $fallbackBaseUrl = '';
+
+        if (!empty($settings['initial_test_mode_enabled']) && $this->is_invalid_auth_response($response)) {
+            $alternateBaseUrl = $this->alternate_initial_base_url($settings['initial_base_url'] ?? '');
+            if ($alternateBaseUrl !== '') {
+                $fallbackSettings = $settings;
+                $fallbackSettings['initial_base_url'] = $alternateBaseUrl;
+                $fallbackClient = new UIX_DF_Rec_Datafast_Client($fallbackSettings);
+                $fallbackResponse = $fallbackClient->create_checkout($payload);
+                if (!empty($fallbackResponse['ok']) && !empty($fallbackResponse['body']['id'])) {
+                    $response = $fallbackResponse;
+                    $fallbackUsed = true;
+                    $fallbackBaseUrl = $alternateBaseUrl;
+                }
+            }
+        }
+
+        return [
+            'response' => $response,
+            'fallback_used' => $fallbackUsed,
+            'fallback_base_url' => $fallbackBaseUrl,
+        ];
+    }
+
     private function fail_wc_checkout_and_back($order, $message, array $logContext = [])
     {
         UIX_DF_Rec_Logger::error($message, $logContext);
@@ -514,8 +569,6 @@ class UIX_DF_Rec_Plugin
 
         UIX_DF_Rec_Logger::info('WC order checkout requested', ['order_id' => $orderId, 'order_total' => $order->get_total(), 'subscription_id' => $subscriptionId]);
 
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
-
         $returnUrl = add_query_arg([
             'uix_df_return' => 1,
             'subscription_id' => $subscriptionId,
@@ -667,7 +720,8 @@ class UIX_DF_Rec_Plugin
         }
 
         UIX_DF_Rec_Logger::info('Creating initial checkout (Woo order)', ['order_id' => $orderId, 'subscription_id' => $subscriptionId, 'payload' => $payload]);
-        $response = $client->create_checkout($payload);
+        $checkoutAttempt = $this->create_initial_checkout_with_endpoint_fallback($settings, $payload);
+        $response = $checkoutAttempt['response'];
         if (!$response['ok'] || empty($response['body']['id'])) {
             $reason = $response['body']['result']['description'] ?? ($response['error'] ?? 'Error desconocido');
             $hint = $this->build_auth_troubleshooting_hint($settings, $reason);
@@ -681,6 +735,11 @@ class UIX_DF_Rec_Plugin
                 'parsed_body' => $response['parsed_body'] ?? null,
                 'payload' => $payload,
             ]);
+        }
+
+        if (!empty($checkoutAttempt['fallback_used'])) {
+            $order->add_order_note('Datafast: checkout inicial creado usando endpoint alterno ' . $checkoutAttempt['fallback_base_url'] . '. Revisa la configuración de Base URL para evitar fallback.');
+            $settings['initial_base_url'] = $checkoutAttempt['fallback_base_url'];
         }
 
         $checkoutId = $response['body']['id'];
@@ -845,7 +904,6 @@ class UIX_DF_Rec_Plugin
             exit;
         }
 
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
         $payload = [
             'entityId' => $settings['initial_entity_id'],
             'amount' => '1.00',
@@ -858,10 +916,14 @@ class UIX_DF_Rec_Plugin
             $payload['testMode'] = 'EXTERNAL';
         }
 
-        $response = $client->create_checkout($payload);
+        $checkoutAttempt = $this->create_initial_checkout_with_endpoint_fallback($settings, $payload);
+        $response = $checkoutAttempt['response'];
 
         if (!empty($response['ok']) && !empty($response['body']['id'])) {
             $message = 'Credenciales válidas. CheckoutId de prueba: ' . $response['body']['id'];
+            if (!empty($checkoutAttempt['fallback_used'])) {
+                $message .= '. Se usó endpoint alterno automáticamente: ' . $checkoutAttempt['fallback_base_url'];
+            }
             wp_safe_redirect(add_query_arg([
                 'uix_df_probe' => 1,
                 'uix_df_probe_status' => 'success',
