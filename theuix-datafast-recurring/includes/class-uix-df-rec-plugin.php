@@ -155,6 +155,11 @@ class UIX_DF_Rec_Plugin
         return !empty($settings['initial_test_mode_enabled']) && !empty($settings['allow_test_placeholders']);
     }
 
+    private function should_enforce_strict_phase2_required_fields(array $settings)
+    {
+        return !empty($settings['strict_phase2_required']);
+    }
+
     private function normalize_identification_doc_id($value)
     {
         $digitsOnly = preg_replace('/\D+/', '', (string) $value);
@@ -426,6 +431,9 @@ class UIX_DF_Rec_Plugin
         $shippingCountry = $order->get_shipping_country() ?: $billingCountry;
         $customerPhone = $order->get_billing_phone();
         $customerIp = $order->get_customer_ip_address();
+        if (trim((string) $customerIp) === '' && isset($_SERVER['REMOTE_ADDR'])) {
+            $customerIp = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
+        }
 
         if ($this->should_allow_test_identification_fallback($settings)) {
             $customerPhone = trim((string) $customerPhone) !== '' ? $customerPhone : '0999999999';
@@ -508,14 +516,19 @@ class UIX_DF_Rec_Plugin
             'customParameters[SHOPPER_VAL_BASE0]',
             'customParameters[SHOPPER_VAL_BASEIMP]',
             'customParameters[SHOPPER_VAL_IVA]',
-            'customParameters[SHOPPER_MID]',
-            'customParameters[SHOPPER_TID]',
-            'customParameters[SHOPPER_ECI]',
-            'customParameters[SHOPPER_PSERV]',
             'customParameters[SHOPPER_VERSIONDF]',
             'customParameters[SHOPPER_CI]',
             'risk.parameters[USER_DATA2]',
         ];
+
+        if ($this->should_enforce_strict_phase2_required_fields($settings)) {
+            $requiredKeys = array_merge($requiredKeys, [
+                'customParameters[SHOPPER_MID]',
+                'customParameters[SHOPPER_TID]',
+                'customParameters[SHOPPER_ECI]',
+                'customParameters[SHOPPER_PSERV]',
+            ]);
+        }
 
         $missing = $this->validate_required_payload_fields($payload, $requiredKeys);
         if (!empty($missing)) {
@@ -527,6 +540,16 @@ class UIX_DF_Rec_Plugin
                 'identification_normalized' => $cedula,
                 'payload' => $payload,
             ]);
+        }
+
+        $optionalShopperKeys = ['customParameters[SHOPPER_MID]', 'customParameters[SHOPPER_TID]', 'customParameters[SHOPPER_ECI]', 'customParameters[SHOPPER_PSERV]'];
+        $missingOptionalShopper = $this->validate_required_payload_fields($payload, $optionalShopperKeys);
+        if (!empty($missingOptionalShopper) && !$this->should_enforce_strict_phase2_required_fields($settings)) {
+            UIX_DF_Rec_Logger::info('Datafast checkout continuing without optional SHOPPER_* parameters', [
+                'order_id' => $orderId,
+                'missing_optional_shopper' => $missingOptionalShopper,
+            ]);
+            $order->add_order_note('Datafast: checkout enviado sin algunos SHOPPER_* opcionales: ' . implode(', ', $missingOptionalShopper));
         }
 
         if ($isTestMode) {
@@ -712,6 +735,7 @@ class UIX_DF_Rec_Plugin
             'uix_df_shopper_tid',
             'uix_df_shopper_eci',
             'uix_df_shopper_pserv',
+            'uix_df_strict_phase2_required',
         ];
 
         foreach ($keys as $key) {
@@ -741,6 +765,7 @@ class UIX_DF_Rec_Plugin
                     <tr><th>SHOPPER_TID</th><td><input class="regular-text" name="uix_df_shopper_tid" value="<?php echo esc_attr(get_option('uix_df_shopper_tid', '')); ?>"></td></tr>
                     <tr><th>SHOPPER_ECI</th><td><input class="regular-text" name="uix_df_shopper_eci" value="<?php echo esc_attr(get_option('uix_df_shopper_eci', '')); ?>"></td></tr>
                     <tr><th>SHOPPER_PSERV</th><td><input class="regular-text" name="uix_df_shopper_pserv" value="<?php echo esc_attr(get_option('uix_df_shopper_pserv', '')); ?>"></td></tr>
+                    <tr><th>Validación estricta phase-2</th><td><label><input type="checkbox" name="uix_df_strict_phase2_required" value="1" <?php checked(get_option('uix_df_strict_phase2_required', 0), 1); ?>> Exigir SHOPPER_MID/TID/ECI/PSERV como obligatorios</label></td></tr>
                     <tr><th>Marcas permitidas</th><td><input class="regular-text" name="uix_df_payment_brands" value="<?php echo esc_attr(get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER')); ?>"><p class="description">Separadas por espacio. Default sin ALIA por compatibilidad general.</p></td></tr>
                     <tr><th>Debug logs</th><td><label><input type="checkbox" name="uix_df_debug_enabled" value="1" <?php checked(get_option('uix_df_debug_enabled', 1), 1); ?>> Habilitar logs detallados</label></td></tr>
                 </table>
@@ -814,6 +839,7 @@ class UIX_DF_Rec_Plugin
             'shopper_tid' => trim((string) get_option('uix_df_shopper_tid', '')),
             'shopper_eci' => trim((string) get_option('uix_df_shopper_eci', '')),
             'shopper_pserv' => trim((string) get_option('uix_df_shopper_pserv', '')),
+            'strict_phase2_required' => (bool) get_option('uix_df_strict_phase2_required', 0),
         ];
     }
 }
