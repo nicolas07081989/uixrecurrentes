@@ -241,6 +241,31 @@ class UIX_DF_Rec_Plugin
         return $missing;
     }
 
+    private function get_initial_checkout_health_report(array $settings)
+    {
+        $criticalMissing = $this->validate_initial_checkout_settings($settings);
+
+        $recommended = [
+            'uix_df_shopper_mid' => $settings['shopper_mid'] ?? '',
+            'uix_df_shopper_tid' => $settings['shopper_tid'] ?? '',
+            'uix_df_shopper_eci' => $settings['shopper_eci'] ?? '',
+            'uix_df_shopper_pserv' => $settings['shopper_pserv'] ?? '',
+        ];
+
+        $recommendedMissing = [];
+        foreach ($recommended as $key => $value) {
+            if (trim((string) $value) === '') {
+                $recommendedMissing[] = $key;
+            }
+        }
+
+        return [
+            'critical_missing' => $criticalMissing,
+            'recommended_missing' => $recommendedMissing,
+            'strict_phase2_required' => !empty($settings['strict_phase2_required']),
+        ];
+    }
+
     private function checkout_notice_message_from_context($defaultMessage, array $logContext = [])
     {
         $reason = isset($logContext['reason']) ? trim((string) $logContext['reason']) : '';
@@ -786,9 +811,28 @@ class UIX_DF_Rec_Plugin
             return;
         }
 
+        $settings = $this->settings();
+        $health = $this->get_initial_checkout_health_report($settings);
+
         ?>
         <div class="wrap">
             <h1>UIX Datafast Recurrentes</h1>
+
+            <h2>Estado de configuración (checkout inicial)</h2>
+            <?php if (empty($health['critical_missing'])) : ?>
+                <div class="notice notice-success"><p><strong>Estado:</strong> Configuración crítica completa ✅</p></div>
+            <?php else : ?>
+                <div class="notice notice-error"><p><strong>Estado:</strong> Configuración incompleta ❌. Faltan: <code><?php echo esc_html(implode(', ', $health['critical_missing'])); ?></code></p></div>
+            <?php endif; ?>
+
+            <?php if (!empty($health['recommended_missing'])) : ?>
+                <div class="notice notice-warning"><p><strong>Campos recomendados sin valor:</strong> <code><?php echo esc_html(implode(', ', $health['recommended_missing'])); ?></code>. El checkout puede funcionar, pero Datafast puede requerirlos según tu cuenta.</p></div>
+            <?php endif; ?>
+
+            <?php if (!empty($health['strict_phase2_required'])) : ?>
+                <p><em>Validación estricta phase-2 está ACTIVA: los campos SHOPPER_* recomendados se tratan como obligatorios.</em></p>
+            <?php endif; ?>
+
             <form method="post" action="options.php">
                 <?php settings_fields('uix_df_rec_settings'); ?>
                 <h2>Primer pago</h2>
