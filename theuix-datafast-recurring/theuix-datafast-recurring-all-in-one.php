@@ -11,6 +11,11 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+if (file_exists(__DIR__ . '/theuix-datafast-recurring.php')) {
+    error_log('[UIX-DF-REC][INFO] All-in-one build self-disabled because includes bootstrap exists in same directory.');
+    return;
+}
+
 if (defined('UIX_DF_REC_PLUGIN_LOADED')) {
     return;
 }
