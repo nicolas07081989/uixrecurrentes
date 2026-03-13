@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       TheUIX Datafast Recurring (All-in-One)
  * Description:       Single-file build of TheUIX Datafast Recurring plugin for environments that require one complete file.
- * Version:           0.3.1
+ * Version:           0.3.2
  * Author:            TheUIXstudio
  * Text Domain:       theuix-datafast-recurring
  */
@@ -23,7 +23,7 @@ if (defined('UIX_DF_REC_PLUGIN_LOADED')) {
 }
 
 define('UIX_DF_REC_PLUGIN_LOADED', true);
-define('UIX_DF_REC_PLUGIN_VERSION', '0.3.1');
+define('UIX_DF_REC_PLUGIN_VERSION', '0.3.2');
 define('UIX_DF_REC_PLUGIN_BUILD', 'all-in-one');
 define('UIX_DF_REC_PLUGIN_FILE', __FILE__);
 define('UIX_DF_REC_PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -1108,12 +1108,14 @@ class UIX_DF_Rec_Plugin
         $entityId = $this->sanitize_entity_id_for_transport($settings['initial_entity_id']);
         $token = $this->sanitize_token_for_transport($settings['initial_bearer_token']);
         $endpoint = rtrim((string) $baseUrl, '/') . '/v1/checkouts';
+        $merchantTransactionId = 'uix_diag_' . gmdate('YmdHis') . '_' . wp_generate_password(6, false, false);
         $payload = [
             'entityId' => $entityId,
             'amount' => '1.00',
             'currency' => 'USD',
             'paymentType' => 'DB',
             'testMode' => 'EXTERNAL',
+            'merchantTransactionId' => $merchantTransactionId,
         ];
 
         $body = http_build_query($payload);
@@ -1126,6 +1128,7 @@ class UIX_DF_Rec_Plugin
         $status = 0;
         $rawBody = '';
         $error = '';
+        $startedAt = microtime(true);
 
         if (function_exists('curl_init')) {
             $transport = 'curl';
@@ -1161,15 +1164,35 @@ class UIX_DF_Rec_Plugin
             }
         }
 
+        $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
+        $parsed = json_decode($rawBody, true);
+        $resultCode = is_array($parsed) ? ($parsed['result']['code'] ?? '') : '';
+        $resultDescription = is_array($parsed) ? ($parsed['result']['description'] ?? '') : '';
+        $tokenHash8 = $token === '' ? '' : substr(hash('sha256', $token), 0, 8);
+
+        $curlCommandRedacted = sprintf(
+            "curl -X POST '%s' -H 'Authorization: Bearer <redacted len=%d hash8=%s>' -H 'Content-Type: application/x-www-form-urlencoded' --data '%s'",
+            $endpoint,
+            strlen($token),
+            $tokenHash8,
+            $body
+        );
+
         return [
+            'endpoint' => $endpoint,
             'base_url' => rtrim((string) $baseUrl, '/'),
             'entity_id' => $entityId,
             'token_length' => strlen($token),
-            'token_hash8' => $token === '' ? '' : substr(hash('sha256', $token), 0, 8),
+            'token_hash8' => $tokenHash8,
+            'merchantTransactionId' => $merchantTransactionId,
+            'curl_command_redacted' => $curlCommandRedacted,
             'status' => $status,
             'raw_body' => $rawBody,
+            'result_code' => $resultCode,
+            'result_description' => $resultDescription,
             'transport' => $transport,
             'error' => $error,
+            'duration_ms' => $durationMs,
         ];
     }
 
@@ -1227,10 +1250,14 @@ class UIX_DF_Rec_Plugin
 
         set_transient('uix_df_diag_result_' . get_current_user_id(), $resultPayload, 300);
 
+        $summary = $selectedBaseUrl !== ''
+            ? ('Diagnóstico cURL: endpoint funcional detectado y configurado automáticamente: ' . $selectedBaseUrl)
+            : 'Diagnóstico cURL: ningún endpoint devolvió éxito.';
+
         wp_safe_redirect(add_query_arg([
             'uix_df_diag' => 1,
             'uix_df_probe_status' => $selectedBaseUrl !== '' ? 'success' : 'error',
-            'uix_df_probe_message' => rawurlencode($selectedBaseUrl !== '' ? ('Diagnóstico completado. Endpoint seleccionado automáticamente: ' . $selectedBaseUrl) : 'Diagnóstico completado.'),
+            'uix_df_probe_message' => rawurlencode($summary),
         ], $adminUrl));
         exit;
     }
@@ -1278,7 +1305,7 @@ class UIX_DF_Rec_Plugin
 
             <?php
             $diag = get_transient('uix_df_diag_result_' . get_current_user_id());
-            if (is_array($diag) && isset($_GET['uix_df_diag'])) :
+            if (is_array($diag)) :
             ?>
                 <h2>Diagnóstico: Probar credenciales con cURL real</h2>
                 <?php if (!empty($diag['both_auth_rejected_message'])) : ?>
@@ -1288,9 +1315,55 @@ class UIX_DF_Rec_Plugin
                     <div class="notice notice-success"><p>Se configuró automáticamente <code>initial_base_url</code> en: <code><?php echo esc_html($diag['selected_base_url']); ?></code></p></div>
                 <?php endif; ?>
                 <h3>Resultado EU TEST</h3>
-                <pre><?php echo esc_html(wp_json_encode($diag['eu_test'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)); ?></pre>
+                <table class="widefat striped">
+                    <tbody>
+                        <tr><th>Endpoint probado</th><td><code><?php echo esc_html($diag['eu_test']['endpoint'] ?? ''); ?></code></td></tr>
+                        <tr><th>Comando cURL ejecutado (redactado)</th><td><code><?php echo esc_html($diag['eu_test']['curl_command_redacted'] ?? ''); ?></code></td></tr>
+                        <tr><th>HTTP status</th><td><?php echo esc_html((string) ($diag['eu_test']['status'] ?? '')); ?></td></tr>
+                        <tr><th>result.code</th><td><?php echo esc_html((string) ($diag['eu_test']['result_code'] ?? '')); ?></td></tr>
+                        <tr><th>result.description</th><td><?php echo esc_html((string) ($diag['eu_test']['result_description'] ?? '')); ?></td></tr>
+                        <tr><th>Error cURL / transporte</th><td><?php echo esc_html((string) ($diag['eu_test']['error'] ?? '')); ?></td></tr>
+                        <tr><th>Tiempo ejecución (ms)</th><td><?php echo esc_html((string) ($diag['eu_test']['duration_ms'] ?? '')); ?></td></tr>
+                        <tr><th>Transporte</th><td><?php echo esc_html((string) ($diag['eu_test']['transport'] ?? '')); ?></td></tr>
+                        <tr><th>Entity ID</th><td><code><?php echo esc_html((string) ($diag['eu_test']['entity_id'] ?? '')); ?></code></td></tr>
+                        <tr><th>Token len/hash8</th><td><?php echo esc_html((string) ($diag['eu_test']['token_length'] ?? '0')); ?> / <?php echo esc_html((string) ($diag['eu_test']['token_hash8'] ?? '')); ?></td></tr>
+                        <tr><th>Raw body completo</th><td><pre><?php echo esc_html((string) ($diag['eu_test']['raw_body'] ?? '')); ?></pre></td></tr>
+                    </tbody>
+                </table>
+
                 <h3>Resultado TEST</h3>
-                <pre><?php echo esc_html(wp_json_encode($diag['test'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)); ?></pre>
+                <table class="widefat striped">
+                    <tbody>
+                        <tr><th>Endpoint probado</th><td><code><?php echo esc_html($diag['test']['endpoint'] ?? ''); ?></code></td></tr>
+                        <tr><th>Comando cURL ejecutado (redactado)</th><td><code><?php echo esc_html($diag['test']['curl_command_redacted'] ?? ''); ?></code></td></tr>
+                        <tr><th>HTTP status</th><td><?php echo esc_html((string) ($diag['test']['status'] ?? '')); ?></td></tr>
+                        <tr><th>result.code</th><td><?php echo esc_html((string) ($diag['test']['result_code'] ?? '')); ?></td></tr>
+                        <tr><th>result.description</th><td><?php echo esc_html((string) ($diag['test']['result_description'] ?? '')); ?></td></tr>
+                        <tr><th>Error cURL / transporte</th><td><?php echo esc_html((string) ($diag['test']['error'] ?? '')); ?></td></tr>
+                        <tr><th>Tiempo ejecución (ms)</th><td><?php echo esc_html((string) ($diag['test']['duration_ms'] ?? '')); ?></td></tr>
+                        <tr><th>Transporte</th><td><?php echo esc_html((string) ($diag['test']['transport'] ?? '')); ?></td></tr>
+                        <tr><th>Entity ID</th><td><code><?php echo esc_html((string) ($diag['test']['entity_id'] ?? '')); ?></code></td></tr>
+                        <tr><th>Token len/hash8</th><td><?php echo esc_html((string) ($diag['test']['token_length'] ?? '0')); ?> / <?php echo esc_html((string) ($diag['test']['token_hash8'] ?? '')); ?></td></tr>
+                        <tr><th>Raw body completo</th><td><pre><?php echo esc_html((string) ($diag['test']['raw_body'] ?? '')); ?></pre></td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Resumen final</h3>
+                <p>
+                    <?php
+                    $euOk = (int) ($diag['eu_test']['status'] ?? 0) < 400 && !empty($diag['eu_test']['result_code']);
+                    $testOk = (int) ($diag['test']['status'] ?? 0) < 400 && !empty($diag['test']['result_code']);
+                    if ($euOk && !$testOk) {
+                        echo 'Funciona: EU TEST. Falla: TEST.';
+                    } elseif (!$euOk && $testOk) {
+                        echo 'Funciona: TEST. Falla: EU TEST.';
+                    } elseif ($euOk && $testOk) {
+                        echo 'Funcionan ambos endpoints.';
+                    } else {
+                        echo 'Fallan ambos endpoints. Revisa status/body/result.description de cada uno.';
+                    }
+                    ?>
+                </p>
             <?php endif; ?>
 
             <form method="post" action="options.php">
