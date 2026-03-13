@@ -78,6 +78,12 @@ class UIX_DF_Rec_Datafast_Client
         return $this->request('GET', $url, ['entityId' => $entityId], 'initial');
     }
 
+    public function verify_payment_with_base_url($baseUrl, $resourcePath, $entityId)
+    {
+        $url = rtrim((string) $baseUrl, '/') . $resourcePath;
+        return $this->request('GET', $url, ['entityId' => $entityId], 'initial');
+    }
+
     private function normalized_auth_header($mode)
     {
         $token = $this->token($mode);
@@ -148,11 +154,14 @@ class UIX_DF_Rec_Datafast_Client
             'raw_body' => $rawBody,
         ]);
 
+        $isJson = is_array($parsedBody);
+        $isHttpOk = $status >= 200 && $status < 300;
+
         return [
-            'ok' => true,
+            'ok' => $isHttpOk && $isJson,
             'status' => $status,
-            'body' => is_array($parsedBody) ? $parsedBody : [],
-            'parsed_body' => is_array($parsedBody) ? $parsedBody : [],
+            'body' => $isJson ? $parsedBody : [],
+            'parsed_body' => $isJson ? $parsedBody : [],
             'raw_body' => $rawBody,
         ];
     }

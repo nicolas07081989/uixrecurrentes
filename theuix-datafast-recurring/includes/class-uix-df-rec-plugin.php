@@ -185,6 +185,92 @@ class UIX_DF_Rec_Plugin
             'amount' => number_format((float) $amount, 2, '.', ''),
             'currency' => strtoupper(trim((string) $currency)) ?: 'USD',
             'paymentType' => 'DB',
+            'testMode' => 'EXTERNAL',
+        ];
+    }
+
+    private function is_verify_auth_error(array $response)
+    {
+        $status = (int) ($response['status'] ?? 0);
+        if ($status === 401 || $status === 403) {
+            return true;
+        }
+
+        $description = '';
+        if (!empty($response['body']['result']['description'])) {
+            $description = (string) $response['body']['result']['description'];
+        } elseif (!empty($response['raw_body'])) {
+            $description = (string) $response['raw_body'];
+        }
+
+        $description = strtolower($description);
+        return strpos($description, 'authorization failed') !== false || strpos($description, 'invalid authentication information') !== false;
+    }
+
+    private function alternate_test_base_url($baseUrl)
+    {
+        $baseUrl = trim((string) $baseUrl);
+        if (stripos($baseUrl, 'eu-test.oppwa.com') !== false) {
+            return 'https://test.oppwa.com';
+        }
+        if (stripos($baseUrl, 'test.oppwa.com') !== false) {
+            return 'https://eu-test.oppwa.com';
+        }
+
+        return '';
+    }
+
+    private function verify_with_all_test_hosts($resourcePath, $entityId, $preferredBaseUrl, array $settings)
+    {
+        $client = new UIX_DF_Rec_Datafast_Client($settings);
+        $hosts = [];
+        $preferredBaseUrl = trim((string) $preferredBaseUrl);
+        if ($preferredBaseUrl !== '') {
+            $hosts[] = rtrim($preferredBaseUrl, '/');
+        }
+
+        $configuredBaseUrl = rtrim((string) ($settings['initial_base_url'] ?? ''), '/');
+        if ($configuredBaseUrl !== '' && !in_array($configuredBaseUrl, $hosts, true)) {
+            $hosts[] = $configuredBaseUrl;
+        }
+
+        $altFromPreferred = $this->alternate_test_base_url($preferredBaseUrl);
+        if ($altFromPreferred !== '' && !in_array($altFromPreferred, $hosts, true)) {
+            $hosts[] = $altFromPreferred;
+        }
+
+        $altFromConfigured = $this->alternate_test_base_url($configuredBaseUrl);
+        if ($altFromConfigured !== '' && !in_array($altFromConfigured, $hosts, true)) {
+            $hosts[] = $altFromConfigured;
+        }
+
+        $attempts = [];
+        $best = null;
+
+        foreach ($hosts as $host) {
+            $response = $client->verify_payment_with_base_url($host, $resourcePath, $entityId);
+            $attempt = [
+                'host' => $host,
+                'response' => $response,
+                'ok' => !empty($response['ok']) && (int) ($response['status'] ?? 0) === 200 && !empty($response['body']),
+            ];
+            $attempts[] = $attempt;
+
+            if ($attempt['ok']) {
+                $best = $attempt;
+                break;
+            }
+
+            if ($best === null) {
+                $best = $attempt;
+            } elseif ($this->is_verify_auth_error($best['response']) && !$this->is_verify_auth_error($response)) {
+                $best = $attempt;
+            }
+        }
+
+        return [
+            'attempts' => $attempts,
+            'best' => $best,
         ];
     }
 
@@ -306,7 +392,7 @@ class UIX_DF_Rec_Plugin
             'base_url' => $settings['initial_base_url'],
             'entity_id' => $payload['entityId'],
         ]);
-        $this->repo->update_checkout($subscriptionId, $checkoutId);
+        $this->repo->update_checkout($subscriptionId, $checkoutId, $settings['initial_base_url']);
 
         $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
 
@@ -415,7 +501,9 @@ class UIX_DF_Rec_Plugin
             'base_url' => $settings['initial_base_url'],
             'entity_id' => $payload['entityId'],
         ]);
-        $this->repo->update_checkout($subscriptionId, $checkoutId);
+        $this->repo->update_checkout($subscriptionId, $checkoutId, $settings['initial_base_url']);
+        $order->update_meta_data('_uix_df_checkout_base_url', $settings['initial_base_url']);
+        $order->save();
 
         $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
 
@@ -471,14 +559,26 @@ class UIX_DF_Rec_Plugin
             wp_die('Retorno inválido: falta resourcePath o id.');
         }
 
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
+        $preferredBaseUrl = '';
+        if (!empty($sub['checkout_resource_path'])) {
+            $preferredBaseUrl = (string) $sub['checkout_resource_path'];
+        }
+        if ($preferredBaseUrl === '' && $orderId > 0 && function_exists('wc_get_order')) {
+            $orderMeta = wc_get_order($orderId);
+            if ($orderMeta) {
+                $preferredBaseUrl = (string) $orderMeta->get_meta('_uix_df_checkout_base_url');
+            }
+        }
+        if ($preferredBaseUrl === '') {
+            $preferredBaseUrl = (string) $settings['initial_base_url'];
+        }
 
-        $verifyFullUrl = rtrim($settings['initial_base_url'], '/') . $verifyTarget['resource_path'];
+        $verifyFullUrl = rtrim($preferredBaseUrl, '/') . $verifyTarget['resource_path'];
         UIX_DF_Rec_Logger::info('verify_request', [
             'subscription_id' => $subscriptionId,
             'order_id' => $orderId,
             'verify_method' => 'GET',
-            'verify_base_url' => $settings['initial_base_url'],
+            'verify_base_url' => $preferredBaseUrl,
             'verify_full_url' => $verifyFullUrl,
             'verify_entityId' => $entityId,
             'verify_param_source' => $verifyTarget['source'],
@@ -486,11 +586,16 @@ class UIX_DF_Rec_Plugin
             'return_resourcePath' => isset($_GET['resourcePath']) ? sanitize_text_field(wp_unslash($_GET['resourcePath'])) : '',
         ]);
 
-        $verification = $client->verify_payment($verifyTarget['resource_path'], $entityId);
+        $verifyRun = $this->verify_with_all_test_hosts($verifyTarget['resource_path'], $entityId, $preferredBaseUrl, $settings);
+        $bestAttempt = $verifyRun['best'];
+        $verification = is_array($bestAttempt) ? $bestAttempt['response'] : ['ok' => false, 'status' => 0, 'body' => [], 'raw_body' => '', 'error' => 'No verify host attempted'];
+        $usedVerifyHost = is_array($bestAttempt) ? (string) $bestAttempt['host'] : '';
 
         UIX_DF_Rec_Logger::info('verify_response', [
             'subscription_id' => $subscriptionId,
             'order_id' => $orderId,
+            'verify_host_used' => $usedVerifyHost,
+            'verify_attempts' => $verifyRun['attempts'],
             'verify_status' => (int) ($verification['status'] ?? 0),
             'verify_body' => $verification['body'] ?? null,
             'verify_raw_body' => $verification['raw_body'] ?? null,
@@ -501,6 +606,7 @@ class UIX_DF_Rec_Plugin
             UIX_DF_Rec_Logger::error('verification_error', [
                 'subscription_id' => $subscriptionId,
                 'order_id' => $orderId,
+                'verify_host_used' => $usedVerifyHost,
                 'verification' => $verification,
             ]);
 
@@ -544,6 +650,7 @@ class UIX_DF_Rec_Plugin
             'result_code' => $resultCode,
             'result_description' => $resultDescription,
             'verify_backend_error' => $isVerifyBackendError,
+            'verify_host_used' => $usedVerifyHost,
         ]);
 
         if ($orderId > 0 && function_exists('wc_get_order')) {
@@ -563,6 +670,7 @@ class UIX_DF_Rec_Plugin
                     UIX_DF_Rec_Logger::error('verification_error', [
                         'subscription_id' => $subscriptionId,
                         'order_id' => $orderId,
+                        'verify_host_used' => $usedVerifyHost,
                         'result_code' => $resultCode,
                         'result_description' => $resultDescription,
                     ]);
@@ -582,9 +690,9 @@ class UIX_DF_Rec_Plugin
         if ($isApproved) {
             echo '<h2>¡Pago aprobado!</h2><p>Tu pago fue verificado correctamente.</p>';
         } elseif ($isVerifyBackendError) {
-            echo '<h2>Verificación pendiente</h2><p>El pago fue enviado, pero la verificación del resultado falló en el backend.</p>';
+            echo '<h2>Verificación pendiente</h2><p>El pago fue enviado, pero la verificación del resultado falló en el backend. Host: ' . esc_html($usedVerifyHost) . ' | HTTP: ' . esc_html((string) $verifyStatus) . ' | Detalle: ' . esc_html($resultDescription) . '</p>';
         } else {
-            echo '<h2>Pago no aprobado</h2><p>Resultado: ' . esc_html($body['result']['description'] ?? 'Error de pago') . '</p>';
+            echo '<h2>Pago no aprobado</h2><p>Host: ' . esc_html($usedVerifyHost) . ' | HTTP: ' . esc_html((string) $verifyStatus) . ' | Resultado: ' . esc_html($body['result']['description'] ?? 'Error de pago') . '</p>';
         }
         echo '</body></html>';
         exit;

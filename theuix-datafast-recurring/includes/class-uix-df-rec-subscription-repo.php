@@ -45,12 +45,18 @@ class UIX_DF_Rec_Subscription_Repo
         return $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$this->table} WHERE id=%d", $id), ARRAY_A);
     }
 
-    public function update_checkout($id, $checkoutId)
+    public function update_checkout($id, $checkoutId, $baseUrl = '')
     {
-        $this->wpdb->update($this->table, [
+        $data = [
             'checkout_id' => $checkoutId,
             'updated_at' => current_time('mysql'),
-        ], ['id' => $id]);
+        ];
+
+        if (trim((string) $baseUrl) !== '') {
+            $data['checkout_resource_path'] = trim((string) $baseUrl);
+        }
+
+        $this->wpdb->update($this->table, $data, ['id' => $id]);
     }
 
     public function mark_from_result($id, array $body)
