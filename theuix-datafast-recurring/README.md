@@ -20,3 +20,12 @@ Plugin WordPress para:
 ```php
  do_action('uix_df_recurring_charge_runner');
 ```
+
+## Solución de problemas de credenciales (entorno TEST)
+Si `POST /v1/checkouts` devuelve `invalid authentication information`, revisa:
+
+1. Que el par `Entity ID + Bearer Token` sea exactamente el entregado para checkout inicial.
+2. Que las credenciales correspondan al endpoint correcto de Datafast (`eu-test.oppwa.com` o `test.oppwa.com`).
+3. Que el token no esté revocado/expirado y tenga permisos para el canal de e-commerce.
+
+Tip: en **UIX Recurrentes** puedes usar **"Probar credenciales"** para verificar rápidamente la autenticación sin pasar por todo el flujo de pago.
