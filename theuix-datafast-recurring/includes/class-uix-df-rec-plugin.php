@@ -90,7 +90,45 @@ class UIX_DF_Rec_Plugin
 
     private function sanitize_token_for_transport($token)
     {
-        return preg_replace('/\s+/', '', trim((string) $token));
+        $token = (string) $token;
+        $token = preg_replace('/\x{FEFF}|\x{200B}|\x{200C}|\x{200D}|\x{00A0}/u', '', $token);
+        $token = str_replace(["\r", "\n", "\t"], '', $token);
+        $token = trim($token);
+        $token = preg_replace('/^Bearer\s+/i', '', $token);
+
+        return $token;
+    }
+
+    private function token_tail_masked($token)
+    {
+        $token = (string) $token;
+        if ($token === '') {
+            return '';
+        }
+
+        $tail = substr($token, -12);
+        if ($tail === false) {
+            $tail = '';
+        }
+
+        $len = strlen($tail);
+        if ($len <= 4) {
+            return str_repeat('*', $len);
+        }
+
+        return str_repeat('*', $len - 4) . substr($tail, -4);
+    }
+
+    public function sanitize_bearer_token_setting($value)
+    {
+        $sanitized = $this->sanitize_token_for_transport($value);
+
+        UIX_DF_Rec_Logger::info('Initial bearer token sanitized on save', [
+            'saved_length' => strlen($sanitized),
+            'saved_tail_masked' => $this->token_tail_masked($sanitized),
+        ]);
+
+        return $sanitized;
     }
 
     private function sanitize_entity_id_for_transport($entityId)
@@ -695,17 +733,13 @@ class UIX_DF_Rec_Plugin
 
     public function register_settings()
     {
-        $keys = [
-            'uix_df_initial_entity_id',
-            'uix_df_initial_bearer_token',
-            'uix_df_initial_base_url',
-            'uix_df_payment_brands',
-            'uix_df_debug_enabled',
-        ];
-
-        foreach ($keys as $key) {
-            register_setting('uix_df_rec_settings', $key);
-        }
+        register_setting('uix_df_rec_settings', 'uix_df_initial_entity_id');
+        register_setting('uix_df_rec_settings', 'uix_df_initial_bearer_token', [
+            'sanitize_callback' => [$this, 'sanitize_bearer_token_setting'],
+        ]);
+        register_setting('uix_df_rec_settings', 'uix_df_initial_base_url');
+        register_setting('uix_df_rec_settings', 'uix_df_payment_brands');
+        register_setting('uix_df_rec_settings', 'uix_df_debug_enabled');
     }
 
     public function render_settings_page()

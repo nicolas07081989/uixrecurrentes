@@ -25,10 +25,33 @@ class UIX_DF_Rec_Datafast_Client
 
     private function sanitize_token($token)
     {
-        $token = preg_replace('/\s+/', '', (string) $token);
-        $token = preg_replace('/^Bearer/i', '', (string) $token);
+        $token = (string) $token;
+        $token = preg_replace('/\x{FEFF}|\x{200B}|\x{200C}|\x{200D}|\x{00A0}/u', '', $token);
+        $token = str_replace(["\r", "\n", "\t"], '', $token);
+        $token = preg_replace('/^Bearer\s+/i', '', $token);
+        $token = trim($token);
 
-        return trim((string) $token);
+        return $token;
+    }
+
+    private function token_tail_masked($mode)
+    {
+        $token = $this->token($mode);
+        if ($token === '') {
+            return '';
+        }
+
+        $tail = substr($token, -12);
+        if ($tail === false) {
+            $tail = '';
+        }
+        $len = strlen($tail);
+
+        if ($len <= 4) {
+            return str_repeat('*', $len);
+        }
+
+        return str_repeat('*', $len - 4) . substr($tail, -4);
     }
 
     private function token_signature($mode)
@@ -91,6 +114,8 @@ class UIX_DF_Rec_Datafast_Client
             'entity_id' => isset($payload['entityId']) ? trim((string) $payload['entityId']) : null,
             'token_length' => $tokenSignature['length'],
             'token_hash8' => $tokenSignature['hash8'],
+            'token_tail_masked' => $this->token_tail_masked($mode),
+            'token_sent_length' => strlen((string) $this->normalized_auth_header($mode)),
             'payload' => $payload,
         ]);
 
