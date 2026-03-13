@@ -25,10 +25,31 @@ class UIX_DF_Rec_Datafast_Client
     private function token($mode)
     {
         if ($mode === 'recurring') {
-            return trim((string) ($this->settings['recurring_bearer_token'] ?? ''));
+            return $this->sanitize_token((string) ($this->settings['recurring_bearer_token'] ?? ''));
         }
 
-        return trim((string) ($this->settings['initial_bearer_token'] ?? ''));
+        return $this->sanitize_token((string) ($this->settings['initial_bearer_token'] ?? ''));
+    }
+
+    private function sanitize_token($token)
+    {
+        $token = preg_replace('/\s+/', '', (string) $token);
+        $token = preg_replace('/^Bearer/i', '', (string) $token);
+
+        return trim((string) $token);
+    }
+
+    private function token_signature($mode)
+    {
+        $token = $this->token($mode);
+        if ($token === '') {
+            return ['length' => 0, 'hash8' => ''];
+        }
+
+        return [
+            'length' => strlen($token),
+            'hash8' => substr(hash('sha256', $token), 0, 8),
+        ];
     }
 
     public function create_checkout(array $payload)
@@ -55,8 +76,7 @@ class UIX_DF_Rec_Datafast_Client
             return '';
         }
 
-        $token = preg_replace('/^Bearer\s+/i', '', $token);
-        return 'Bearer ' . trim((string) $token);
+        return 'Bearer ' . $token;
     }
 
     private function request($method, $url, array $payload, $mode)
@@ -76,10 +96,15 @@ class UIX_DF_Rec_Datafast_Client
             $args['body'] = http_build_query($payload);
         }
 
+        $tokenSignature = $this->token_signature($mode);
         UIX_DF_Rec_Logger::info('Datafast request', [
             'method' => $method,
             'url' => $url,
+            'base_url' => $this->base_url($mode),
             'mode' => $mode,
+            'entity_id' => isset($payload['entityId']) ? trim((string) $payload['entityId']) : null,
+            'token_length' => $tokenSignature['length'],
+            'token_hash8' => $tokenSignature['hash8'],
             'payload' => $payload,
         ]);
 

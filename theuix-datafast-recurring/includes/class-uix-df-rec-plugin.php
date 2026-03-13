@@ -26,6 +26,7 @@ class UIX_DF_Rec_Plugin
         add_action('admin_post_nopriv_uix_df_create_checkout', [$this, 'handle_create_checkout']);
         add_action('admin_post_uix_df_create_checkout', [$this, 'handle_create_checkout']);
         add_action('admin_post_uix_df_test_initial_credentials', [$this, 'handle_test_initial_credentials']);
+        add_action('admin_post_uix_df_test_initial_verify', [$this, 'handle_test_initial_verify']);
         add_action('template_redirect', [$this, 'handle_wc_checkout']);
         add_action('template_redirect', [$this, 'handle_return']);
 
@@ -288,6 +289,11 @@ class UIX_DF_Rec_Plugin
         return preg_replace('/\s+/', '', trim((string) $token));
     }
 
+    private function sanitize_entity_id_for_transport($entityId)
+    {
+        return preg_replace('/\s+/', '', trim((string) $entityId));
+    }
+
     private function build_auth_troubleshooting_hint(array $settings, $reason)
     {
         $reason = strtolower(trim((string) $reason));
@@ -328,6 +334,18 @@ class UIX_DF_Rec_Plugin
         return stripos($description, 'invalid authentication information') !== false;
     }
 
+    private function is_user_authorization_failed_response(array $response)
+    {
+        $description = '';
+        if (!empty($response['body']['result']['description'])) {
+            $description = (string) $response['body']['result']['description'];
+        } elseif (!empty($response['error'])) {
+            $description = (string) $response['error'];
+        }
+
+        return stripos($description, 'user authorization failed') !== false;
+    }
+
     private function alternate_initial_base_url($baseUrl)
     {
         $baseUrl = trim((string) $baseUrl);
@@ -357,6 +375,46 @@ class UIX_DF_Rec_Plugin
                 $fallbackClient = new UIX_DF_Rec_Datafast_Client($fallbackSettings);
                 $fallbackResponse = $fallbackClient->create_checkout($payload);
                 if (!empty($fallbackResponse['ok']) && !empty($fallbackResponse['body']['id'])) {
+                    $response = $fallbackResponse;
+                    $fallbackUsed = true;
+                    $fallbackBaseUrl = $alternateBaseUrl;
+                }
+            }
+        }
+
+        return [
+            'response' => $response,
+            'fallback_used' => $fallbackUsed,
+            'fallback_base_url' => $fallbackBaseUrl,
+        ];
+    }
+
+    private function verify_initial_payment_with_endpoint_fallback(array $settings, $resourcePath, $entityId)
+    {
+        $client = new UIX_DF_Rec_Datafast_Client($settings);
+        $response = $client->verify_payment($resourcePath, $entityId);
+        $fallbackUsed = false;
+        $fallbackBaseUrl = '';
+
+        $shouldTryFallback = !empty($settings['initial_test_mode_enabled']) && (
+            $this->is_invalid_auth_response($response) || $this->is_user_authorization_failed_response($response)
+        );
+
+        if ($shouldTryFallback) {
+            $alternateBaseUrl = $this->alternate_initial_base_url($settings['initial_base_url'] ?? '');
+            if ($alternateBaseUrl !== '') {
+                UIX_DF_Rec_Logger::info('Trying verify fallback endpoint', [
+                    'resource_path' => $resourcePath,
+                    'reason' => $response['body']['result']['description'] ?? ($response['error'] ?? 'auth issue'),
+                    'primary_base_url' => $settings['initial_base_url'] ?? '',
+                    'fallback_base_url' => $alternateBaseUrl,
+                    'entity_id' => $entityId,
+                ]);
+                $fallbackSettings = $settings;
+                $fallbackSettings['initial_base_url'] = $alternateBaseUrl;
+                $fallbackClient = new UIX_DF_Rec_Datafast_Client($fallbackSettings);
+                $fallbackResponse = $fallbackClient->verify_payment($resourcePath, $entityId);
+                if (!empty($fallbackResponse['ok']) && (int) ($fallbackResponse['status'] ?? 0) < 400) {
                     $response = $fallbackResponse;
                     $fallbackUsed = true;
                     $fallbackBaseUrl = $alternateBaseUrl;
@@ -445,7 +503,6 @@ class UIX_DF_Rec_Plugin
 
         $settings = $this->settings();
         UIX_DF_Rec_Logger::info('Initial shortcode checkout requested', ['plan' => $planSlug, 'amount' => $amount, 'email' => $email]);
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
         $returnUrl = add_query_arg([
             'uix_df_return' => 1,
             'subscription_id' => $subscriptionId,
@@ -453,7 +510,7 @@ class UIX_DF_Rec_Plugin
 
         $nameParts = preg_split('/\s+/', trim($fullName), 2);
         $payload = [
-            'entityId' => $settings['initial_entity_id'],
+            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
             'amount' => $amount,
             'currency' => 'USD',
             'paymentType' => 'DB',
@@ -475,8 +532,11 @@ class UIX_DF_Rec_Plugin
             $payload['testMode'] = 'EXTERNAL';
         }
 
+        unset($payload['shopperResultURL'], $payload['shopperResultUrl']);
+
         UIX_DF_Rec_Logger::info('Creating initial checkout (shortcode)', ['subscription_id' => $subscriptionId, 'payload' => $payload]);
-        $response = $client->create_checkout($payload);
+        $checkoutAttempt = $this->create_initial_checkout_with_endpoint_fallback($settings, $payload);
+        $response = $checkoutAttempt['response'];
         if (!$response['ok'] || empty($response['body']['id'])) {
             UIX_DF_Rec_Logger::error('Checkout creation failed (shortcode)', [
                 'subscription_id' => $subscriptionId,
@@ -491,12 +551,16 @@ class UIX_DF_Rec_Plugin
         $checkoutId = $response['body']['id'];
         $this->repo->update_checkout($subscriptionId, $checkoutId);
 
+        if (!empty($checkoutAttempt['fallback_used'])) {
+            $settings['initial_base_url'] = $checkoutAttempt['fallback_base_url'];
+        }
+
         $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
 
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar suscripción</title></head><body>';
         echo '<h2>Finaliza tu pago</h2>';
         echo '<script src="' . esc_url($widgetJs) . '"></script>';
-        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '" data-create-registration="true"></form>';
+        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '"></form>';
         echo '<script src="https://www.datafast.com.ec/js/dfAdditionalValidations1.js"></script>';
         echo '</body></html>';
         exit;
@@ -609,7 +673,7 @@ class UIX_DF_Rec_Plugin
         $names = $this->resolve_customer_name_parts($order->get_billing_first_name(), $order->get_billing_last_name());
 
         $payload = [
-            'entityId' => $settings['initial_entity_id'],
+            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
             'amount' => $amount,
             'currency' => $order->get_currency() ?: 'USD',
             'paymentType' => 'DB',
@@ -719,6 +783,8 @@ class UIX_DF_Rec_Plugin
             $payload['testMode'] = 'EXTERNAL';
         }
 
+        unset($payload['shopperResultURL'], $payload['shopperResultUrl']);
+
         UIX_DF_Rec_Logger::info('Creating initial checkout (Woo order)', ['order_id' => $orderId, 'subscription_id' => $subscriptionId, 'payload' => $payload]);
         $checkoutAttempt = $this->create_initial_checkout_with_endpoint_fallback($settings, $payload);
         $response = $checkoutAttempt['response'];
@@ -757,7 +823,7 @@ class UIX_DF_Rec_Plugin
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar orden</title></head><body>';
         echo '<h2>Finaliza tu pago</h2>';
         echo '<script src="' . esc_url($widgetJs) . '"></script>';
-        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '" data-create-registration="true"></form>';
+        echo '<form action="' . esc_url($returnUrl) . '" class="paymentWidgets" data-brands="' . esc_attr($this->payment_brands_attr()) . '"></form>';
         echo '<script src="https://www.datafast.com.ec/js/dfAdditionalValidations1.js"></script>';
         echo '</body></html>';
         exit;
@@ -782,13 +848,32 @@ class UIX_DF_Rec_Plugin
         }
 
         $settings = $this->settings();
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
-        UIX_DF_Rec_Logger::info('Verifying initial payment', ['subscription_id' => $subscriptionId, 'resourcePath' => $resourcePath]);
-        $verification = $client->verify_payment($resourcePath, $settings['initial_entity_id']);
+        $entityId = $this->sanitize_entity_id_for_transport($settings['initial_entity_id']);
+        UIX_DF_Rec_Logger::info('Verifying initial payment', [
+            'subscription_id' => $subscriptionId,
+            'resourcePath' => $resourcePath,
+            'base_url' => $settings['initial_base_url'],
+            'entity_id' => $entityId,
+            'method' => 'GET',
+        ]);
+        $verificationAttempt = $this->verify_initial_payment_with_endpoint_fallback($settings, $resourcePath, $entityId);
+        $verification = $verificationAttempt['response'];
 
         if (!$verification['ok']) {
-            UIX_DF_Rec_Logger::error('Initial verification failed', ['subscription_id' => $subscriptionId, 'verification' => $verification]);
+            UIX_DF_Rec_Logger::error('Initial verification failed', [
+                'subscription_id' => $subscriptionId,
+                'verification' => $verification,
+                'used_fallback' => $verificationAttempt['fallback_used'],
+                'fallback_base_url' => $verificationAttempt['fallback_base_url'],
+            ]);
             wp_die('No se pudo verificar el pago');
+        }
+
+        if (!empty($verificationAttempt['fallback_used'])) {
+            UIX_DF_Rec_Logger::info('Initial verification succeeded with fallback endpoint', [
+                'subscription_id' => $subscriptionId,
+                'fallback_base_url' => $verificationAttempt['fallback_base_url'],
+            ]);
         }
 
         $body = $verification['body'];
@@ -847,17 +932,60 @@ class UIX_DF_Rec_Plugin
         UIX_DF_Rec_Logger::info('Recurring runner started', ['due_count' => count($subs)]);
 
         foreach ($subs as $sub) {
+            $amount = number_format((float) $sub['amount'], 2, '.', '');
+            $merchantTransactionId = 'uixrec_' . $sub['id'] . '_' . gmdate('YmdHis');
+            $valBase0 = trim((string) ($settings['shopper_val_base0'] ?? '0.00'));
+            $valBaseImp = trim((string) ($settings['shopper_val_baseimp'] ?? $amount));
+            $valIva = trim((string) ($settings['shopper_val_iva'] ?? '0.00'));
             $payload = [
-                'entityId' => $settings['recurring_entity_id'],
-                'amount' => number_format((float) $sub['amount'], 2, '.', ''),
+                'entityId' => $this->sanitize_entity_id_for_transport($settings['recurring_entity_id']),
+                'amount' => $amount,
                 'currency' => 'USD',
                 'paymentType' => 'DB',
                 'recurringType' => 'REPEATED',
                 'risk.parameters[USER_DATA1]' => 'REPEATED',
+                'risk.parameters[USER_DATA2]' => 'TheUIXstudio',
+                'merchantTransactionId' => $merchantTransactionId,
+                'customParameters[SHOPPER_MID]' => $settings['shopper_mid'],
+                'customParameters[SHOPPER_TID]' => $settings['shopper_tid'],
+                'customParameters[SHOPPER_ECI]' => $settings['shopper_eci'],
+                'customParameters[SHOPPER_PSERV]' => $settings['shopper_pserv'],
+                'customParameters[SHOPPER_VAL_BASE0]' => $valBase0,
+                'customParameters[SHOPPER_VAL_BASEIMP]' => $valBaseImp,
+                'customParameters[SHOPPER_VAL_IVA]' => $valIva,
+                'customParameters[SHOPPER_VERSIONDF]' => '2',
             ];
 
             if (!empty($settings['recurring_test_mode_enabled'])) {
                 $payload['testMode'] = 'EXTERNAL';
+            }
+
+            $payload = $this->remove_empty_payload_fields($payload);
+            $missingRecurring = $this->validate_required_payload_fields($payload, [
+                'entityId',
+                'amount',
+                'currency',
+                'paymentType',
+                'recurringType',
+                'risk.parameters[USER_DATA1]',
+                'merchantTransactionId',
+                'customParameters[SHOPPER_MID]',
+                'customParameters[SHOPPER_TID]',
+                'customParameters[SHOPPER_ECI]',
+                'customParameters[SHOPPER_PSERV]',
+                'customParameters[SHOPPER_VAL_BASE0]',
+                'customParameters[SHOPPER_VAL_BASEIMP]',
+                'customParameters[SHOPPER_VAL_IVA]',
+                'customParameters[SHOPPER_VERSIONDF]',
+            ]);
+
+            if (!empty($missingRecurring)) {
+                UIX_DF_Rec_Logger::error('Recurring charge skipped: missing required fields', [
+                    'subscription_id' => (int) $sub['id'],
+                    'missing_fields' => $missingRecurring,
+                    'payload' => $payload,
+                ]);
+                continue;
             }
 
             UIX_DF_Rec_Logger::info('Recurring charge attempt', ['subscription_id' => (int) $sub['id'], 'status' => $sub['status'], 'next_charge_at' => $sub['next_charge_at']]);
@@ -905,7 +1033,7 @@ class UIX_DF_Rec_Plugin
         }
 
         $payload = [
-            'entityId' => $settings['initial_entity_id'],
+            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
             'amount' => '1.00',
             'currency' => 'USD',
             'paymentType' => 'DB',
@@ -920,7 +1048,7 @@ class UIX_DF_Rec_Plugin
         $response = $checkoutAttempt['response'];
 
         if (!empty($response['ok']) && !empty($response['body']['id'])) {
-            $message = 'Credenciales válidas. CheckoutId de prueba: ' . $response['body']['id'];
+            $message = 'Credenciales válidas. base_url=' . $settings['initial_base_url'] . ', entityId=' . $payload['entityId'] . ', checkoutId=' . $response['body']['id'];
             if (!empty($checkoutAttempt['fallback_used'])) {
                 $message .= '. Se usó endpoint alterno automáticamente: ' . $checkoutAttempt['fallback_base_url'];
             }
@@ -942,12 +1070,61 @@ class UIX_DF_Rec_Plugin
         }
 
         $hint = $this->build_auth_troubleshooting_hint($settings, $reason);
-        $fullMessage = $hint !== '' ? ($reason . '. ' . $hint) : $reason;
+        $fullMessage = 'base_url=' . $settings['initial_base_url'] . ', entityId=' . $payload['entityId'] . ', status=' . (int) ($response['status'] ?? 0) . '. ' . ($hint !== '' ? ($reason . '. ' . $hint) : $reason);
 
         wp_safe_redirect(add_query_arg([
             'uix_df_probe' => 1,
             'uix_df_probe_status' => 'error',
             'uix_df_probe_message' => rawurlencode($fullMessage),
+        ], $adminUrl));
+        exit;
+    }
+
+    public function handle_test_initial_verify()
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('No autorizado');
+        }
+
+        check_admin_referer('uix_df_test_initial_verify', 'uix_df_test_verify_nonce');
+
+        $settings = $this->settings();
+        $adminUrl = admin_url('admin.php?page=uix-df-rec');
+        $resourcePath = isset($_POST['resource_path']) ? sanitize_text_field(wp_unslash($_POST['resource_path'])) : '';
+        if ($resourcePath === '') {
+            wp_safe_redirect(add_query_arg([
+                'uix_df_probe' => 1,
+                'uix_df_probe_status' => 'error',
+                'uix_df_probe_message' => rawurlencode('Debes ingresar resourcePath para probar verify.'),
+            ], $adminUrl));
+            exit;
+        }
+
+        $entityId = $this->sanitize_entity_id_for_transport($settings['initial_entity_id']);
+        $attempt = $this->verify_initial_payment_with_endpoint_fallback($settings, $resourcePath, $entityId);
+        $response = $attempt['response'];
+        $status = (int) ($response['status'] ?? 0);
+
+        $message = 'verify base_url=' . $settings['initial_base_url'] . ', entityId=' . $entityId . ', status=' . $status;
+        if (!empty($attempt['fallback_used'])) {
+            $message .= ', fallback=' . $attempt['fallback_base_url'];
+        }
+
+        if ($status < 400 && !empty($response['body']['id'])) {
+            $message .= ', tx=' . $response['body']['id'] . ', result=' . ($response['body']['result']['code'] ?? 'n/a');
+            wp_safe_redirect(add_query_arg([
+                'uix_df_probe' => 1,
+                'uix_df_probe_status' => 'success',
+                'uix_df_probe_message' => rawurlencode($message),
+            ], $adminUrl));
+            exit;
+        }
+
+        $message .= ', reason=' . ($response['body']['result']['description'] ?? ($response['error'] ?? 'error desconocido'));
+        wp_safe_redirect(add_query_arg([
+            'uix_df_probe' => 1,
+            'uix_df_probe_status' => 'error',
+            'uix_df_probe_message' => rawurlencode($message),
         ], $adminUrl));
         exit;
     }
@@ -977,6 +1154,9 @@ class UIX_DF_Rec_Plugin
             'uix_df_shopper_tid',
             'uix_df_shopper_eci',
             'uix_df_shopper_pserv',
+            'uix_df_shopper_val_base0',
+            'uix_df_shopper_val_baseimp',
+            'uix_df_shopper_val_iva',
             'uix_df_strict_phase2_required',
             'uix_df_initial_integration_phase',
         ];
@@ -1038,6 +1218,9 @@ class UIX_DF_Rec_Plugin
                     <tr><th>SHOPPER_TID</th><td><input class="regular-text" name="uix_df_shopper_tid" value="<?php echo esc_attr(get_option('uix_df_shopper_tid', '')); ?>"></td></tr>
                     <tr><th>SHOPPER_ECI</th><td><input class="regular-text" name="uix_df_shopper_eci" value="<?php echo esc_attr(get_option('uix_df_shopper_eci', '')); ?>"></td></tr>
                     <tr><th>SHOPPER_PSERV</th><td><input class="regular-text" name="uix_df_shopper_pserv" value="<?php echo esc_attr(get_option('uix_df_shopper_pserv', '')); ?>"></td></tr>
+                    <tr><th>SHOPPER_VAL_BASE0</th><td><input class="regular-text" name="uix_df_shopper_val_base0" value="<?php echo esc_attr(get_option('uix_df_shopper_val_base0', '0.00')); ?>"></td></tr>
+                    <tr><th>SHOPPER_VAL_BASEIMP</th><td><input class="regular-text" name="uix_df_shopper_val_baseimp" value="<?php echo esc_attr(get_option('uix_df_shopper_val_baseimp', '')); ?>"></td></tr>
+                    <tr><th>SHOPPER_VAL_IVA</th><td><input class="regular-text" name="uix_df_shopper_val_iva" value="<?php echo esc_attr(get_option('uix_df_shopper_val_iva', '0.00')); ?>"></td></tr>
                     <tr><th>Validación estricta phase-2</th><td><label><input type="checkbox" name="uix_df_strict_phase2_required" value="1" <?php checked(get_option('uix_df_strict_phase2_required', 0), 1); ?>> Exigir SHOPPER_MID/TID/ECI/PSERV como obligatorios</label></td></tr>
                     <tr><th>Marcas permitidas</th><td><input class="regular-text" name="uix_df_payment_brands" value="<?php echo esc_attr(get_option('uix_df_payment_brands', 'VISA MASTER AMEX DINERS DISCOVER')); ?>"><p class="description">Separadas por espacio. Default sin ALIA por compatibilidad general.</p></td></tr>
                     <tr><th>Debug logs</th><td><label><input type="checkbox" name="uix_df_debug_enabled" value="1" <?php checked(get_option('uix_df_debug_enabled', 1), 1); ?>> Habilitar logs detallados</label></td></tr>
@@ -1060,6 +1243,15 @@ class UIX_DF_Rec_Plugin
                 <input type="hidden" name="action" value="uix_df_test_initial_credentials">
                 <?php wp_nonce_field('uix_df_test_initial_credentials', 'uix_df_test_nonce'); ?>
                 <?php submit_button('Probar credenciales ahora', 'secondary', 'submit', false); ?>
+            </form>
+
+            <h2>Probar verify con resourcePath</h2>
+            <p>Útil para diagnosticar errores <code>403 user authorization failed</code> en el retorno.</p>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="uix_df_test_initial_verify">
+                <?php wp_nonce_field('uix_df_test_initial_verify', 'uix_df_test_verify_nonce'); ?>
+                <p><input class="large-text" name="resource_path" placeholder="/v1/checkouts/{id}/payment?..." required></p>
+                <?php submit_button('Probar verify ahora', 'secondary', 'submit', false); ?>
             </form>
 
             <p>Shortcode: <code>[uix_subscribe_form plan="plan-pro" title="Plan Pro" amount="49.00"]</code></p>
@@ -1106,11 +1298,11 @@ class UIX_DF_Rec_Plugin
     private function settings()
     {
         return [
-            'initial_entity_id' => get_option('uix_df_initial_entity_id', ''),
+            'initial_entity_id' => $this->sanitize_entity_id_for_transport(get_option('uix_df_initial_entity_id', '')),
             'initial_bearer_token' => $this->sanitize_token_for_transport(get_option('uix_df_initial_bearer_token', '')),
             'initial_base_url' => get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com'),
             'initial_test_mode_enabled' => (bool) get_option('uix_df_initial_test_mode_enabled', 1),
-            'recurring_entity_id' => get_option('uix_df_recurring_entity_id', ''),
+            'recurring_entity_id' => $this->sanitize_entity_id_for_transport(get_option('uix_df_recurring_entity_id', '')),
             'recurring_bearer_token' => $this->sanitize_token_for_transport(get_option('uix_df_recurring_bearer_token', '')),
             'recurring_base_url' => get_option('uix_df_recurring_base_url', 'https://eu-test.oppwa.com'),
             'recurring_test_mode_enabled' => (bool) get_option('uix_df_recurring_test_mode_enabled', 1),
@@ -1121,6 +1313,9 @@ class UIX_DF_Rec_Plugin
             'shopper_tid' => trim((string) get_option('uix_df_shopper_tid', '')),
             'shopper_eci' => trim((string) get_option('uix_df_shopper_eci', '')),
             'shopper_pserv' => trim((string) get_option('uix_df_shopper_pserv', '')),
+            'shopper_val_base0' => trim((string) get_option('uix_df_shopper_val_base0', '0.00')),
+            'shopper_val_baseimp' => trim((string) get_option('uix_df_shopper_val_baseimp', '')),
+            'shopper_val_iva' => trim((string) get_option('uix_df_shopper_val_iva', '0.00')),
             'strict_phase2_required' => (bool) get_option('uix_df_strict_phase2_required', 0),
             'initial_integration_phase' => get_option('uix_df_initial_integration_phase', 'phase1'),
         ];
