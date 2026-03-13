@@ -247,7 +247,7 @@ class UIX_DF_Rec_Plugin
         $attempts = [];
         $best = null;
 
-        foreach ($hosts as $host) {
+        foreach ($hosts as $idx => $host) {
             $response = $client->verify_payment_with_base_url($host, $resourcePath, $entityId);
             $attempt = [
                 'host' => $host,
@@ -266,6 +266,11 @@ class UIX_DF_Rec_Plugin
             } elseif ($this->is_verify_auth_error($best['response']) && !$this->is_verify_auth_error($response)) {
                 $best = $attempt;
             }
+
+            // Reintentar en host alterno solo para auth/authorization en verify.
+            if ($idx === 0 && !$this->is_verify_auth_error($response)) {
+                break;
+            }
         }
 
         return [
@@ -276,7 +281,8 @@ class UIX_DF_Rec_Plugin
 
     private function resolve_verify_resource_path_from_return(array $query, $entityId)
     {
-        $resourcePath = isset($query['resourcePath']) ? sanitize_text_field(wp_unslash($query['resourcePath'])) : '';
+        $resourcePath = isset($query['resourcePath']) ? wp_unslash($query['resourcePath']) : '';
+        $resourcePath = trim((string) $resourcePath);
         $id = isset($query['id']) ? sanitize_text_field(wp_unslash($query['id'])) : '';
 
         if ($resourcePath !== '') {
@@ -287,18 +293,50 @@ class UIX_DF_Rec_Plugin
             ];
         }
 
-        if ($id !== '') {
-            return [
-                'source' => 'id',
-                'resource_path' => '/v1/checkouts/' . rawurlencode($id) . '/payment',
-                'id' => $id,
-            ];
-        }
-
         return [
             'source' => 'none',
             'resource_path' => '',
-            'id' => '',
+            'id' => $id,
+        ];
+    }
+
+    private function create_checkout_with_host_fallback(array $settings, array $payload)
+    {
+        $client = new UIX_DF_Rec_Datafast_Client($settings);
+        $baseUrl = rtrim((string) ($settings['initial_base_url'] ?? ''), '/');
+        $response = $client->create_checkout_with_base_url($baseUrl, $payload);
+        $attempts = [
+            [
+                'host' => $baseUrl,
+                'response' => $response,
+            ],
+        ];
+
+        $usedBaseUrl = $baseUrl;
+        $fallbackUsed = false;
+
+        if (($this->is_verify_auth_error($response) || (int) ($response['status'] ?? 0) >= 400) && !empty($settings['initial_base_url'])) {
+            $alternate = $this->alternate_test_base_url($baseUrl);
+            if ($alternate !== '') {
+                $altResponse = $client->create_checkout_with_base_url($alternate, $payload);
+                $attempts[] = [
+                    'host' => $alternate,
+                    'response' => $altResponse,
+                ];
+
+                if (!empty($altResponse['ok']) && !empty($altResponse['body']['id'])) {
+                    $response = $altResponse;
+                    $usedBaseUrl = $alternate;
+                    $fallbackUsed = true;
+                }
+            }
+        }
+
+        return [
+            'response' => $response,
+            'used_base_url' => $usedBaseUrl,
+            'fallback_used' => $fallbackUsed,
+            'attempts' => $attempts,
         ];
     }
 
@@ -370,8 +408,8 @@ class UIX_DF_Rec_Plugin
         ], home_url('/'));
 
         $payload = $this->build_phase1_checkout_payload($settings['initial_entity_id'], $amount, 'USD');
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
-        $response = $client->create_checkout($payload);
+        $checkoutRun = $this->create_checkout_with_host_fallback($settings, $payload);
+        $response = $checkoutRun['response'];
 
         if (!$response['ok'] || empty($response['body']['id'])) {
             UIX_DF_Rec_Logger::error('Checkout creation failed (shortcode)', [
@@ -389,12 +427,14 @@ class UIX_DF_Rec_Plugin
             'flow' => 'shortcode',
             'subscription_id' => $subscriptionId,
             'checkout_id' => $checkoutId,
-            'base_url' => $settings['initial_base_url'],
+            'base_url' => $checkoutRun['used_base_url'],
+            'fallback_used' => $checkoutRun['fallback_used'],
+            'checkout_attempts' => $checkoutRun['attempts'],
             'entity_id' => $payload['entityId'],
         ]);
-        $this->repo->update_checkout($subscriptionId, $checkoutId, $settings['initial_base_url']);
+        $this->repo->update_checkout($subscriptionId, $checkoutId, $checkoutRun['used_base_url']);
 
-        $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
+        $widgetJs = rtrim($checkoutRun['used_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
 
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar suscripción</title></head><body>';
         echo '<!-- UIX DF PHASE1 BUILD: ' . esc_html(defined('UIX_DF_REC_PLUGIN_BUILD') ? UIX_DF_REC_PLUGIN_BUILD : 'unknown') . ' v' . esc_html(defined('UIX_DF_REC_PLUGIN_VERSION') ? UIX_DF_REC_PLUGIN_VERSION : 'unknown') . ' -->';
@@ -478,8 +518,8 @@ class UIX_DF_Rec_Plugin
             $order->get_currency() ?: 'USD'
         );
 
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
-        $response = $client->create_checkout($payload);
+        $checkoutRun = $this->create_checkout_with_host_fallback($settings, $payload);
+        $response = $checkoutRun['response'];
 
         if (!$response['ok'] || empty($response['body']['id'])) {
             $this->fail_wc_checkout_and_back($order, 'WC checkout creation failed', [
@@ -498,14 +538,16 @@ class UIX_DF_Rec_Plugin
             'order_id' => $orderId,
             'subscription_id' => $subscriptionId,
             'checkout_id' => $checkoutId,
-            'base_url' => $settings['initial_base_url'],
+            'base_url' => $checkoutRun['used_base_url'],
+            'fallback_used' => $checkoutRun['fallback_used'],
+            'checkout_attempts' => $checkoutRun['attempts'],
             'entity_id' => $payload['entityId'],
         ]);
-        $this->repo->update_checkout($subscriptionId, $checkoutId, $settings['initial_base_url']);
-        $order->update_meta_data('_uix_df_checkout_base_url', $settings['initial_base_url']);
+        $this->repo->update_checkout($subscriptionId, $checkoutId, $checkoutRun['used_base_url']);
+        $order->update_meta_data('_uix_df_checkout_base_url', $checkoutRun['used_base_url']);
         $order->save();
 
-        $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
+        $widgetJs = rtrim($checkoutRun['used_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
 
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pagar orden</title></head><body>';
         echo '<!-- UIX DF PHASE1 BUILD: ' . esc_html(defined('UIX_DF_REC_PLUGIN_BUILD') ? UIX_DF_REC_PLUGIN_BUILD : 'unknown') . ' v' . esc_html(defined('UIX_DF_REC_PLUGIN_VERSION') ? UIX_DF_REC_PLUGIN_VERSION : 'unknown') . ' -->';

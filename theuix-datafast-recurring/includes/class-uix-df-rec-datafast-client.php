@@ -72,6 +72,11 @@ class UIX_DF_Rec_Datafast_Client
         return $this->request('POST', $this->base_url('initial') . '/v1/checkouts', $payload, 'initial');
     }
 
+    public function create_checkout_with_base_url($baseUrl, array $payload)
+    {
+        return $this->request('POST', rtrim((string) $baseUrl, '/') . '/v1/checkouts', $payload, 'initial');
+    }
+
     public function verify_payment($resourcePath, $entityId)
     {
         $url = $this->base_url('initial') . $resourcePath;
@@ -163,6 +168,8 @@ class UIX_DF_Rec_Datafast_Client
             'body' => $isJson ? $parsedBody : [],
             'parsed_body' => $isJson ? $parsedBody : [],
             'raw_body' => $rawBody,
+            'final_url' => $url,
+            'host_used' => (string) parse_url($url, PHP_URL_HOST),
         ];
     }
 }
