@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       TheUIX Datafast Recurring (All-in-One)
  * Description:       Single-file build of TheUIX Datafast Recurring plugin for environments that require one complete file.
- * Version:           0.3.3
+ * Version:           0.3.4
  * Author:            TheUIXstudio
  * Text Domain:       theuix-datafast-recurring
  */
@@ -23,7 +23,7 @@ if (defined('UIX_DF_REC_PLUGIN_LOADED')) {
 }
 
 define('UIX_DF_REC_PLUGIN_LOADED', true);
-define('UIX_DF_REC_PLUGIN_VERSION', '0.3.3');
+define('UIX_DF_REC_PLUGIN_VERSION', '0.3.4');
 define('UIX_DF_REC_PLUGIN_BUILD', 'all-in-one');
 define('UIX_DF_REC_PLUGIN_FILE', __FILE__);
 define('UIX_DF_REC_PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -787,6 +787,34 @@ class UIX_DF_Rec_Plugin
         ];
     }
 
+    private function resolve_verify_resource_path_from_return(array $query, $entityId)
+    {
+        $resourcePath = isset($query['resourcePath']) ? sanitize_text_field(wp_unslash($query['resourcePath'])) : '';
+        $id = isset($query['id']) ? sanitize_text_field(wp_unslash($query['id'])) : '';
+
+        if ($resourcePath !== '') {
+            return [
+                'source' => 'resourcePath',
+                'resource_path' => $resourcePath,
+                'id' => $id,
+            ];
+        }
+
+        if ($id !== '') {
+            return [
+                'source' => 'id',
+                'resource_path' => '/v1/checkouts/' . rawurlencode($id) . '/payment',
+                'id' => $id,
+            ];
+        }
+
+        return [
+            'source' => 'none',
+            'resource_path' => '',
+            'id' => '',
+        ];
+    }
+
     public function register_shortcode()
     {
         add_shortcode('uix_subscribe_form', [$this, 'render_subscribe_form']);
@@ -870,6 +898,13 @@ class UIX_DF_Rec_Plugin
         }
 
         $checkoutId = $response['body']['id'];
+        UIX_DF_Rec_Logger::info('checkout_created', [
+            'flow' => 'shortcode',
+            'subscription_id' => $subscriptionId,
+            'checkout_id' => $checkoutId,
+            'base_url' => $settings['initial_base_url'],
+            'entity_id' => $payload['entityId'],
+        ]);
         $this->repo->update_checkout($subscriptionId, $checkoutId);
 
         $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
@@ -971,6 +1006,14 @@ class UIX_DF_Rec_Plugin
         }
 
         $checkoutId = $response['body']['id'];
+        UIX_DF_Rec_Logger::info('checkout_created', [
+            'flow' => 'wc',
+            'order_id' => $orderId,
+            'subscription_id' => $subscriptionId,
+            'checkout_id' => $checkoutId,
+            'base_url' => $settings['initial_base_url'],
+            'entity_id' => $payload['entityId'],
+        ]);
         $this->repo->update_checkout($subscriptionId, $checkoutId);
 
         $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
@@ -992,10 +1035,10 @@ class UIX_DF_Rec_Plugin
         }
 
         $subscriptionId = isset($_GET['subscription_id']) ? (int) $_GET['subscription_id'] : 0;
-        $resourcePath = isset($_GET['resourcePath']) ? sanitize_text_field(wp_unslash($_GET['resourcePath'])) : '';
+        $orderId = isset($_GET['order_id']) ? (int) $_GET['order_id'] : 0;
 
-        if ($subscriptionId <= 0 || $resourcePath === '') {
-            wp_die('Retorno inválido: falta subscription_id/resourcePath');
+        if ($subscriptionId <= 0) {
+            wp_die('Retorno inválido: falta subscription_id');
         }
 
         $sub = $this->repo->find($subscriptionId);
@@ -1005,37 +1048,87 @@ class UIX_DF_Rec_Plugin
 
         $settings = $this->settings();
         $entityId = $this->sanitize_entity_id_for_transport($settings['initial_entity_id']);
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
+        $verifyTarget = $this->resolve_verify_resource_path_from_return($_GET, $entityId);
 
-        UIX_DF_Rec_Logger::info('Verifying initial payment', [
+        UIX_DF_Rec_Logger::info('return_received', [
             'subscription_id' => $subscriptionId,
-            'resourcePath' => $resourcePath,
-            'base_url' => $settings['initial_base_url'],
-            'entity_id' => $entityId,
-            'method' => 'GET',
+            'order_id' => $orderId,
+            'return_params' => [
+                'resourcePath' => isset($_GET['resourcePath']) ? sanitize_text_field(wp_unslash($_GET['resourcePath'])) : '',
+                'id' => isset($_GET['id']) ? sanitize_text_field(wp_unslash($_GET['id'])) : '',
+                'key' => isset($_GET['key']) ? sanitize_text_field(wp_unslash($_GET['key'])) : '',
+            ],
+            'verify_param_source' => $verifyTarget['source'],
         ]);
 
-        $verification = $client->verify_payment($resourcePath, $entityId);
+        if ($verifyTarget['resource_path'] === '') {
+            UIX_DF_Rec_Logger::error('verification_error', [
+                'subscription_id' => $subscriptionId,
+                'order_id' => $orderId,
+                'reason' => 'No resourcePath ni id en retorno',
+            ]);
+            wp_die('Retorno inválido: falta resourcePath o id.');
+        }
+
+        $client = new UIX_DF_Rec_Datafast_Client($settings);
+
+        $verifyFullUrl = rtrim($settings['initial_base_url'], '/') . $verifyTarget['resource_path'];
+        UIX_DF_Rec_Logger::info('verify_request', [
+            'subscription_id' => $subscriptionId,
+            'order_id' => $orderId,
+            'verify_method' => 'GET',
+            'verify_base_url' => $settings['initial_base_url'],
+            'verify_full_url' => $verifyFullUrl,
+            'verify_entityId' => $entityId,
+            'verify_param_source' => $verifyTarget['source'],
+            'return_id' => $verifyTarget['id'],
+            'return_resourcePath' => isset($_GET['resourcePath']) ? sanitize_text_field(wp_unslash($_GET['resourcePath'])) : '',
+        ]);
+
+        $verification = $client->verify_payment($verifyTarget['resource_path'], $entityId);
+
+        UIX_DF_Rec_Logger::info('verify_response', [
+            'subscription_id' => $subscriptionId,
+            'order_id' => $orderId,
+            'verify_status' => (int) ($verification['status'] ?? 0),
+            'verify_body' => $verification['body'] ?? null,
+            'verify_raw_body' => $verification['raw_body'] ?? null,
+            'verify_error' => $verification['error'] ?? '',
+        ]);
 
         if (!$verification['ok']) {
-            UIX_DF_Rec_Logger::error('Initial verification failed transport', [
+            UIX_DF_Rec_Logger::error('verification_error', [
                 'subscription_id' => $subscriptionId,
+                'order_id' => $orderId,
                 'verification' => $verification,
             ]);
+
+            if ($orderId > 0 && function_exists('wc_get_order')) {
+                $order = wc_get_order($orderId);
+                if ($order) {
+                    $order->update_status('on-hold', __('Pago enviado. Falló la verificación del resultado en backend.', 'uix-df-rec'));
+                    $order->add_order_note(__('Datafast verify backend falló (transporte/auth). Revisar logs.', 'uix-df-rec'));
+                }
+            }
+
             wp_die('No se pudo verificar el pago');
         }
 
         $body = $verification['body'];
         $this->repo->mark_from_result($subscriptionId, $body);
 
-        $isApproved = UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '');
+        $resultCode = $body['result']['code'] ?? '';
+        $resultDescription = $body['result']['description'] ?? '';
+        $verifyStatus = (int) ($verification['status'] ?? 0);
+        $isVerifyBackendError = ($verifyStatus === 403 && stripos((string) $resultDescription, 'user authorization failed') !== false);
+        $isApproved = UIX_DF_Rec_Result_Codes::is_success($resultCode);
 
         $this->repo->add_attempt([
             'subscription_id' => $subscriptionId,
             'idempotency_key' => wp_generate_uuid4(),
             'kind' => 'initial',
             'requested_amount' => (float) $sub['amount'],
-            'request_payload_redacted' => ['resourcePath' => $resourcePath, 'entityId' => $entityId],
+            'request_payload_redacted' => ['resourcePath' => $verifyTarget['resource_path'], 'entityId' => $entityId],
             'response_payload_redacted' => $body,
             'http_status' => (int) $verification['status'],
             'result_code' => $body['result']['code'] ?? null,
@@ -1047,19 +1140,39 @@ class UIX_DF_Rec_Plugin
         UIX_DF_Rec_Logger::info('Initial payment verification result', [
             'subscription_id' => $subscriptionId,
             'approved' => $isApproved,
-            'result_code' => $body['result']['code'] ?? null,
-            'result_description' => $body['result']['description'] ?? null,
+            'result_code' => $resultCode,
+            'result_description' => $resultDescription,
+            'verify_backend_error' => $isVerifyBackendError,
         ]);
 
-        $orderId = isset($_GET['order_id']) ? (int) $_GET['order_id'] : 0;
         if ($orderId > 0 && function_exists('wc_get_order')) {
             $order = wc_get_order($orderId);
             if ($order) {
                 if ($isApproved) {
                     $order->payment_complete($body['id'] ?? '');
                     $order->add_order_note(__('Pago Datafast confirmado.', 'uix-df-rec'));
+                    UIX_DF_Rec_Logger::info('payment_marked_success', [
+                        'subscription_id' => $subscriptionId,
+                        'order_id' => $orderId,
+                        'result_code' => $resultCode,
+                    ]);
+                } elseif ($isVerifyBackendError) {
+                    $order->update_status('on-hold', __('Pago enviado. Falló la verificación del resultado en backend.', 'uix-df-rec'));
+                    $order->add_order_note(__('Datafast verify respondió 403 user authorization failed. Revisar credenciales de verify.', 'uix-df-rec'));
+                    UIX_DF_Rec_Logger::error('verification_error', [
+                        'subscription_id' => $subscriptionId,
+                        'order_id' => $orderId,
+                        'result_code' => $resultCode,
+                        'result_description' => $resultDescription,
+                    ]);
                 } else {
                     $order->update_status('failed', __('Pago Datafast no aprobado.', 'uix-df-rec'));
+                    UIX_DF_Rec_Logger::info('payment_marked_failed', [
+                        'subscription_id' => $subscriptionId,
+                        'order_id' => $orderId,
+                        'result_code' => $resultCode,
+                        'result_description' => $resultDescription,
+                    ]);
                 }
             }
         }
@@ -1067,6 +1180,8 @@ class UIX_DF_Rec_Plugin
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Resultado pago</title></head><body>';
         if ($isApproved) {
             echo '<h2>¡Pago aprobado!</h2><p>Tu pago fue verificado correctamente.</p>';
+        } elseif ($isVerifyBackendError) {
+            echo '<h2>Verificación pendiente</h2><p>El pago fue enviado, pero la verificación del resultado falló en el backend.</p>';
         } else {
             echo '<h2>Pago no aprobado</h2><p>Resultado: ' . esc_html($body['result']['description'] ?? 'Error de pago') . '</p>';
         }
