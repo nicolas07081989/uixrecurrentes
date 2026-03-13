@@ -72,11 +72,6 @@ class UIX_DF_Rec_Datafast_Client
         return $this->request('POST', $this->base_url('initial') . '/v1/checkouts', $payload, 'initial');
     }
 
-    public function create_checkout_with_base_url($baseUrl, array $payload)
-    {
-        return $this->request('POST', rtrim((string) $baseUrl, '/') . '/v1/checkouts', $payload, 'initial');
-    }
-
     public function verify_payment($resourcePath, $entityId)
     {
         $url = $this->base_url('initial') . $resourcePath;
@@ -145,12 +140,15 @@ class UIX_DF_Rec_Datafast_Client
                 'body' => null,
                 'parsed_body' => null,
                 'raw_body' => null,
+                'headers' => [],
             ];
         }
 
         $status = (int) wp_remote_retrieve_response_code($response);
         $rawBody = (string) wp_remote_retrieve_body($response);
         $parsedBody = json_decode($rawBody, true);
+        $headers = wp_remote_retrieve_headers($response);
+        $headersArray = is_array($headers) ? $headers : (method_exists($headers, 'getAll') ? $headers->getAll() : []);
 
         UIX_DF_Rec_Logger::info('Datafast response', [
             'mode' => $mode,
@@ -168,6 +166,7 @@ class UIX_DF_Rec_Datafast_Client
             'body' => $isJson ? $parsedBody : [],
             'parsed_body' => $isJson ? $parsedBody : [],
             'raw_body' => $rawBody,
+            'headers' => $headersArray,
             'final_url' => $url,
             'host_used' => (string) parse_url($url, PHP_URL_HOST),
         ];

@@ -48,6 +48,7 @@ class UIX_DF_Rec_DB
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
             checkout_id VARCHAR(120) NULL,
             checkout_resource_path VARCHAR(255) NULL,
+            checkout_entity_id VARCHAR(120) NULL,
             payment_brand VARCHAR(50) NULL,
             last_transaction_id VARCHAR(120) NULL,
             last_result_code VARCHAR(20) NULL,
