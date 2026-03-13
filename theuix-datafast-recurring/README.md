@@ -29,3 +29,10 @@ Si `POST /v1/checkouts` devuelve `invalid authentication information`, revisa:
 3. Que el token no esté revocado/expirado y tenga permisos para el canal de e-commerce.
 
 Tip: en **UIX Recurrentes** puedes usar **"Probar credenciales"** para verificar rápidamente la autenticación sin pasar por todo el flujo de pago.
+
+## Versión en un solo archivo
+Si necesitas entregar el plugin como un único código completo, usa:
+
+- `theuix-datafast-recurring/theuix-datafast-recurring-all-in-one.php`
+
+Este archivo contiene todo el plugin (bootstrap + clases) en una sola pieza, sin dependencias de `includes/`.
