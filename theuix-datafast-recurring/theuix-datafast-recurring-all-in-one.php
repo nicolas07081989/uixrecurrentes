@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       TheUIX Datafast Recurring (All-in-One)
  * Description:       Single-file build of TheUIX Datafast Recurring plugin for environments that require one complete file.
- * Version:           0.2.1
+ * Version:           0.2.2
  * Author:            TheUIXstudio
  * Text Domain:       theuix-datafast-recurring
  */
@@ -11,6 +11,8 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Generated build from modular source in /includes.
+// Canonical implementation is the modular build: theuix-datafast-recurring.php + includes/*.
 if (file_exists(__DIR__ . '/theuix-datafast-recurring.php')) {
     error_log('[UIX-DF-REC][INFO] All-in-one build self-disabled because includes bootstrap exists in same directory.');
     return;
@@ -21,7 +23,7 @@ if (defined('UIX_DF_REC_PLUGIN_LOADED')) {
 }
 
 define('UIX_DF_REC_PLUGIN_LOADED', true);
-define('UIX_DF_REC_PLUGIN_VERSION', '0.2.1');
+define('UIX_DF_REC_PLUGIN_VERSION', '0.2.2');
 define('UIX_DF_REC_PLUGIN_BUILD', 'all-in-one');
 define('UIX_DF_REC_PLUGIN_FILE', __FILE__);
 define('UIX_DF_REC_PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -273,9 +275,11 @@ class UIX_DF_Rec_Subscription_Repo
             'updated_at' => current_time('mysql'),
         ];
 
-        if ($isSuccess && !empty($body['registrationId'])) {
+        if ($isSuccess) {
             $data['status'] = 'active';
-            $data['next_charge_at'] = $next;
+            if (!empty($body['registrationId'])) {
+                $data['next_charge_at'] = $next;
+            }
             $data['retry_count'] = 0;
         } else {
             $data['status'] = 'payment_failed';
@@ -593,6 +597,17 @@ class UIX_DF_Rec_Plugin
     private static $instance;
     private $repo;
 
+    private function is_phase1_pure_mode()
+    {
+        return $this->current_initial_phase() === 'phase1';
+    }
+
+    private function current_initial_phase()
+    {
+        $phase = (string) get_option('uix_df_initial_integration_phase', 'phase1');
+        return $phase === 'phase2' ? 'phase2' : 'phase1';
+    }
+
     public static function instance()
     {
         if (!self::$instance) {
@@ -605,6 +620,12 @@ class UIX_DF_Rec_Plugin
     public function init()
     {
         $this->repo = new UIX_DF_Rec_Subscription_Repo();
+        $settings = $this->settings();
+
+        UIX_DF_Rec_Logger::info('Plugin runtime mode', [
+            'phase1_pure_mode' => $this->is_phase1_pure_mode(),
+            'configured_initial_integration_phase' => $this->current_initial_phase(),
+        ]);
 
         add_action('init', [$this, 'register_shortcode']);
         add_action('admin_post_nopriv_uix_df_create_checkout', [$this, 'handle_create_checkout']);
@@ -617,7 +638,12 @@ class UIX_DF_Rec_Plugin
         add_action('admin_menu', [$this, 'register_admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
 
-        add_action('uix_df_recurring_charge_runner', [$this, 'run_recurring_runner']);
+        if (!$this->is_phase1_pure_mode()) {
+            add_action('uix_df_recurring_charge_runner', [$this, 'run_recurring_runner']);
+        } else {
+            wp_clear_scheduled_hook('uix_df_recurring_charge_runner');
+            UIX_DF_Rec_Logger::info('Recurring hooks disabled: phase1 pure mode active');
+        }
 
         add_action('woocommerce_loaded', [$this, 'bootstrap_wc_gateway']);
         add_action('plugins_loaded', [$this, 'maybe_show_woocommerce_notice'], 20);
@@ -628,7 +654,9 @@ class UIX_DF_Rec_Plugin
         add_filter('woocommerce_checkout_fields', [$this, 'add_checkout_identification_field']);
         add_action('woocommerce_checkout_create_order', [$this, 'save_checkout_identification_field'], 20, 2);
 
-        UIX_DF_Rec_DB::schedule_events();
+        if (!$this->is_phase1_pure_mode()) {
+            UIX_DF_Rec_DB::schedule_events();
+        }
     }
 
     public function maybe_show_woocommerce_notice()
@@ -697,10 +725,12 @@ class UIX_DF_Rec_Plugin
             return $fields;
         }
 
+        $required = $this->current_initial_phase() === 'phase2';
+
         $fields['billing']['uix_df_cedula_ruc'] = [
             'type' => 'text',
             'label' => __('Cédula / RUC', 'uix-df-rec'),
-            'required' => true,
+            'required' => $required,
             'class' => ['form-row-wide'],
             'priority' => 125,
             'clear' => true,
@@ -749,6 +779,16 @@ class UIX_DF_Rec_Plugin
     private function is_initial_phase2_mode(array $settings)
     {
         return ($settings['initial_integration_phase'] ?? 'phase1') === 'phase2';
+    }
+
+    private function build_phase1_checkout_payload($entityId, $amount, $currency)
+    {
+        return [
+            'entityId' => $this->sanitize_entity_id_for_transport($entityId),
+            'amount' => number_format((float) $amount, 2, '.', ''),
+            'currency' => strtoupper(trim((string) $currency)) ?: 'USD',
+            'paymentType' => 'DB',
+        ];
     }
 
     private function normalize_identification_doc_id($value)
@@ -844,9 +884,11 @@ class UIX_DF_Rec_Plugin
         ];
 
         $recommendedMissing = [];
-        foreach ($recommended as $key => $value) {
-            if (trim((string) $value) === '') {
-                $recommendedMissing[] = $key;
+        if (($settings['initial_integration_phase'] ?? 'phase1') === 'phase2') {
+            foreach ($recommended as $key => $value) {
+                if (trim((string) $value) === '') {
+                    $recommendedMissing[] = $key;
+                }
             }
         }
 
@@ -1087,40 +1129,18 @@ class UIX_DF_Rec_Plugin
 
         $settings = $this->settings();
         UIX_DF_Rec_Logger::info('Initial shortcode checkout requested', ['plan' => $planSlug, 'amount' => $amount, 'email' => $email]);
-        $client = new UIX_DF_Rec_Datafast_Client($settings);
         $returnUrl = add_query_arg([
             'uix_df_return' => 1,
             'subscription_id' => $subscriptionId,
         ], home_url('/'));
 
-        $nameParts = preg_split('/\s+/', trim($fullName), 2);
-        $payload = [
-            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
-            'amount' => $amount,
-            'currency' => 'USD',
-            'paymentType' => 'DB',
-            'createRegistration' => 'true',
-            'customer.givenName' => $nameParts[0] ?? $fullName,
-            'customer.surname' => $nameParts[1] ?? 'Cliente',
-            'customer.email' => $email,
-            'customer.identificationDocType' => 'IDCARD',
-            'customer.identificationDocId' => $cedula,
-            'merchantTransactionId' => 'uixshort_' . $subscriptionId . '_' . gmdate('YmdHis'),
-            'customParameters[SHOPPER_VERSIONDF]' => '2',
-            'cart.items[0].name' => $planTitle,
-            'cart.items[0].price' => $amount,
-            'cart.items[0].quantity' => '1',
-            'cart.items[0].tax' => '0.00',
-        ];
-
-        if (!empty($settings['initial_test_mode_enabled'])) {
-            $payload['testMode'] = 'EXTERNAL';
-        }
+        $payload = $this->build_phase1_checkout_payload($settings['initial_entity_id'], $amount, 'USD');
 
         unset($payload['shopperResultURL'], $payload['shopperResultUrl']);
 
         UIX_DF_Rec_Logger::info('Creating initial checkout (shortcode)', ['subscription_id' => $subscriptionId, 'payload' => $payload]);
-        $response = $client->create_checkout($payload);
+        $checkoutAttempt = $this->create_initial_checkout_with_endpoint_fallback($settings, $payload);
+        $response = $checkoutAttempt['response'];
         if (!$response['ok'] || empty($response['body']['id'])) {
             UIX_DF_Rec_Logger::error('Checkout creation failed (shortcode)', [
                 'subscription_id' => $subscriptionId,
@@ -1134,6 +1154,10 @@ class UIX_DF_Rec_Plugin
 
         $checkoutId = $response['body']['id'];
         $this->repo->update_checkout($subscriptionId, $checkoutId);
+
+        if (!empty($checkoutAttempt['fallback_used'])) {
+            $settings['initial_base_url'] = $checkoutAttempt['fallback_base_url'];
+        }
 
         $widgetJs = rtrim($settings['initial_base_url'], '/') . '/v1/paymentWidgets.js?checkoutId=' . rawurlencode($checkoutId);
 
@@ -1182,18 +1206,6 @@ class UIX_DF_Rec_Plugin
 
         $cedulaRaw = $this->get_order_identification($order);
         $cedula = $this->normalize_identification_doc_id($cedulaRaw);
-        if ($phase2Mode && $cedula === '') {
-            if ($this->should_allow_test_identification_fallback($settings)) {
-                $cedula = '9999999999';
-                $order->add_order_note('Datafast test mode: usando cédula de fallback 9999999999 por falta de dato en orden.');
-                UIX_DF_Rec_Logger::info('Using test identification fallback', ['order_id' => $orderId]);
-            } else {
-                $this->fail_wc_checkout_and_back($order, 'Missing order identification', [
-                    'order_id' => $orderId,
-                    'reason' => 'Falta Cédula/RUC en la orden (_uix_df_cedula_ruc).',
-                ]);
-            }
-        }
 
         $subscriptionId = (int) $order->get_meta('_uix_df_subscription_id');
         if ($subscriptionId <= 0) {
@@ -1220,49 +1232,35 @@ class UIX_DF_Rec_Plugin
             'key' => $order->get_order_key(),
         ], home_url('/'));
 
-        $isTestMode = !empty($settings['initial_test_mode_enabled']);
-
-        $billingState = $order->get_billing_state() ?: $order->get_shipping_state();
-        $billingCountry = $order->get_billing_country() ?: $order->get_shipping_country();
-        $billingCity = $order->get_billing_city() ?: $order->get_shipping_city();
-        $billingStreet = $order->get_billing_address_1();
-        $billingPostcode = $order->get_billing_postcode();
-        $shippingStreet = $order->get_shipping_address_1() ?: $billingStreet;
-        $shippingCountry = $order->get_shipping_country() ?: $billingCountry;
-        $customerPhone = $order->get_billing_phone();
-        $customerIp = $order->get_customer_ip_address();
-        if (trim((string) $customerIp) === '' && isset($_SERVER['REMOTE_ADDR'])) {
-            $customerIp = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
-        }
-
-        if ($this->should_allow_test_identification_fallback($settings)) {
-            $customerPhone = trim((string) $customerPhone) !== '' ? $customerPhone : '0999999999';
-            $billingStreet = trim((string) $billingStreet) !== '' ? $billingStreet : 'N/A';
-            $billingCity = trim((string) $billingCity) !== '' ? $billingCity : 'Quito';
-            $billingState = trim((string) $billingState) !== '' ? $billingState : 'Pichincha';
-            $billingCountry = trim((string) $billingCountry) !== '' ? $billingCountry : 'EC';
-            $billingPostcode = trim((string) $billingPostcode) !== '' ? $billingPostcode : '170150';
-            $shippingStreet = trim((string) $shippingStreet) !== '' ? $shippingStreet : 'N/A';
-            $shippingCountry = trim((string) $shippingCountry) !== '' ? $shippingCountry : 'EC';
-        }
-
         $amount = number_format((float) $order->get_total(), 2, '.', '');
-        $baseImp = number_format((float) ($order->get_total() - $order->get_total_tax()), 2, '.', '');
-        $tax = number_format((float) $order->get_total_tax(), 2, '.', '');
-        $merchantCustomerId = (string) ($order->get_customer_id() ?: $order->get_billing_email() ?: ('guest-' . $orderId));
-        $names = $this->resolve_customer_name_parts($order->get_billing_first_name(), $order->get_billing_last_name());
 
-        $payload = [
-            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
-            'amount' => $amount,
-            'currency' => $order->get_currency() ?: 'USD',
-            'paymentType' => 'DB',
-            'createRegistration' => 'true',
-            'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
-        ];
+        $payload = $this->build_phase1_checkout_payload(
+            $settings['initial_entity_id'],
+            $amount,
+            $order->get_currency() ?: 'USD'
+        );
 
         if ($phase2Mode) {
+            $billingState = $order->get_billing_state() ?: $order->get_shipping_state();
+            $billingCountry = $order->get_billing_country() ?: $order->get_shipping_country();
+            $billingCity = $order->get_billing_city() ?: $order->get_shipping_city();
+            $billingStreet = $order->get_billing_address_1();
+            $billingPostcode = $order->get_billing_postcode();
+            $shippingStreet = $order->get_shipping_address_1() ?: $billingStreet;
+            $shippingCountry = $order->get_shipping_country() ?: $billingCountry;
+            $customerPhone = $order->get_billing_phone();
+            $customerIp = $order->get_customer_ip_address();
+            if (trim((string) $customerIp) === '' && isset($_SERVER['REMOTE_ADDR'])) {
+                $customerIp = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
+            }
+            $baseImp = number_format((float) ($order->get_total() - $order->get_total_tax()), 2, '.', '');
+            $tax = number_format((float) $order->get_total_tax(), 2, '.', '');
+            $merchantCustomerId = (string) ($order->get_customer_id() ?: $order->get_billing_email() ?: ('guest-' . $orderId));
+            $names = $this->resolve_customer_name_parts($order->get_billing_first_name(), $order->get_billing_last_name());
+
             $payload = array_merge($payload, [
+                'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
+                'createRegistration' => 'true',
                 'customer.givenName' => $names['given'],
                 'customer.middleName' => $names['middle'],
                 'customer.surname' => $names['surname'],
@@ -1294,6 +1292,10 @@ class UIX_DF_Rec_Plugin
                 'cart.items[0].quantity' => '1',
                 'cart.items[0].tax' => $tax,
             ]);
+
+            if (!empty($settings['initial_test_mode_enabled'])) {
+                $payload['testMode'] = 'EXTERNAL';
+            }
         }
 
         $payload = $this->remove_empty_payload_fields($payload);
@@ -1357,10 +1359,6 @@ class UIX_DF_Rec_Plugin
                 ]);
                 $order->add_order_note('Datafast: checkout enviado sin algunos SHOPPER_* opcionales: ' . implode(', ', $missingOptionalShopper));
             }
-        }
-
-        if ($isTestMode) {
-            $payload['testMode'] = 'EXTERNAL';
         }
 
         unset($payload['shopperResultURL'], $payload['shopperResultUrl']);
@@ -1473,7 +1471,7 @@ class UIX_DF_Rec_Plugin
             'decision' => UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '') ? 'approved' : 'declined',
         ]);
 
-        $ok = UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '') && !empty($body['registrationId']);
+        $ok = UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '');
         UIX_DF_Rec_Logger::info('Initial payment verification result', ['subscription_id' => $subscriptionId, 'ok' => $ok, 'result_code' => $body['result']['code'] ?? null, 'has_registration' => !empty($body['registrationId'])]);
 
         $orderId = isset($_GET['order_id']) ? (int) $_GET['order_id'] : 0;
@@ -1501,6 +1499,11 @@ class UIX_DF_Rec_Plugin
 
     public function run_recurring_runner()
     {
+        if ($this->is_phase1_pure_mode()) {
+            UIX_DF_Rec_Logger::info('Recurring runner skipped: phase1 pure mode active');
+            return;
+        }
+
         $settings = $this->settings();
         if (empty($settings['recurring_entity_id']) || empty($settings['recurring_bearer_token'])) {
             UIX_DF_Rec_Logger::info('Recurring runner skipped: missing recurring credentials');
@@ -1612,17 +1615,7 @@ class UIX_DF_Rec_Plugin
             exit;
         }
 
-        $payload = [
-            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
-            'amount' => '1.00',
-            'currency' => 'USD',
-            'paymentType' => 'DB',
-            'merchantTransactionId' => 'uix_probe_' . gmdate('YmdHis'),
-        ];
-
-        if (!empty($settings['initial_test_mode_enabled'])) {
-            $payload['testMode'] = 'EXTERNAL';
-        }
+        $payload = $this->build_phase1_checkout_payload($settings['initial_entity_id'], '1.00', 'USD');
 
         $checkoutAttempt = $this->create_initial_checkout_with_endpoint_fallback($settings, $payload);
         $response = $checkoutAttempt['response'];

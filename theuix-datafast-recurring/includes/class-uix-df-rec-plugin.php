@@ -11,7 +11,13 @@ class UIX_DF_Rec_Plugin
 
     private function is_phase1_pure_mode()
     {
-        return true;
+        return $this->current_initial_phase() === 'phase1';
+    }
+
+    private function current_initial_phase()
+    {
+        $phase = (string) get_option('uix_df_initial_integration_phase', 'phase1');
+        return $phase === 'phase2' ? 'phase2' : 'phase1';
     }
 
     public static function instance()
@@ -30,7 +36,7 @@ class UIX_DF_Rec_Plugin
 
         UIX_DF_Rec_Logger::info('Plugin runtime mode', [
             'phase1_pure_mode' => $this->is_phase1_pure_mode(),
-            'configured_initial_integration_phase' => $settings['initial_integration_phase'] ?? 'phase1',
+            'configured_initial_integration_phase' => $this->current_initial_phase(),
         ]);
 
         add_action('init', [$this, 'register_shortcode']);
@@ -131,10 +137,12 @@ class UIX_DF_Rec_Plugin
             return $fields;
         }
 
+        $required = $this->current_initial_phase() === 'phase2';
+
         $fields['billing']['uix_df_cedula_ruc'] = [
             'type' => 'text',
             'label' => __('Cédula / RUC', 'uix-df-rec'),
-            'required' => true,
+            'required' => $required,
             'class' => ['form-row-wide'],
             'priority' => 125,
             'clear' => true,
@@ -182,11 +190,17 @@ class UIX_DF_Rec_Plugin
 
     private function is_initial_phase2_mode(array $settings)
     {
-        if ($this->is_phase1_pure_mode()) {
-            return false;
-        }
-
         return ($settings['initial_integration_phase'] ?? 'phase1') === 'phase2';
+    }
+
+    private function build_phase1_checkout_payload($entityId, $amount, $currency)
+    {
+        return [
+            'entityId' => $this->sanitize_entity_id_for_transport($entityId),
+            'amount' => number_format((float) $amount, 2, '.', ''),
+            'currency' => strtoupper(trim((string) $currency)) ?: 'USD',
+            'paymentType' => 'DB',
+        ];
     }
 
     private function normalize_identification_doc_id($value)
@@ -282,9 +296,11 @@ class UIX_DF_Rec_Plugin
         ];
 
         $recommendedMissing = [];
-        foreach ($recommended as $key => $value) {
-            if (trim((string) $value) === '') {
-                $recommendedMissing[] = $key;
+        if (($settings['initial_integration_phase'] ?? 'phase1') === 'phase2') {
+            foreach ($recommended as $key => $value) {
+                if (trim((string) $value) === '') {
+                    $recommendedMissing[] = $key;
+                }
             }
         }
 
@@ -530,17 +546,7 @@ class UIX_DF_Rec_Plugin
             'subscription_id' => $subscriptionId,
         ], home_url('/'));
 
-        $payload = [
-            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
-            'amount' => $amount,
-            'currency' => 'USD',
-            'paymentType' => 'DB',
-            'merchantTransactionId' => 'uixshort_' . $subscriptionId . '_' . gmdate('YmdHis'),
-        ];
-
-        if (!empty($settings['initial_test_mode_enabled'])) {
-            $payload['testMode'] = 'EXTERNAL';
-        }
+        $payload = $this->build_phase1_checkout_payload($settings['initial_entity_id'], $amount, 'USD');
 
         unset($payload['shopperResultURL'], $payload['shopperResultUrl']);
 
@@ -638,20 +644,35 @@ class UIX_DF_Rec_Plugin
             'key' => $order->get_order_key(),
         ], home_url('/'));
 
-        $isTestMode = !empty($settings['initial_test_mode_enabled']);
-
         $amount = number_format((float) $order->get_total(), 2, '.', '');
 
-        $payload = [
-            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
-            'amount' => $amount,
-            'currency' => $order->get_currency() ?: 'USD',
-            'paymentType' => 'DB',
-            'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
-        ];
+        $payload = $this->build_phase1_checkout_payload(
+            $settings['initial_entity_id'],
+            $amount,
+            $order->get_currency() ?: 'USD'
+        );
 
         if ($phase2Mode) {
+            $billingState = $order->get_billing_state() ?: $order->get_shipping_state();
+            $billingCountry = $order->get_billing_country() ?: $order->get_shipping_country();
+            $billingCity = $order->get_billing_city() ?: $order->get_shipping_city();
+            $billingStreet = $order->get_billing_address_1();
+            $billingPostcode = $order->get_billing_postcode();
+            $shippingStreet = $order->get_shipping_address_1() ?: $billingStreet;
+            $shippingCountry = $order->get_shipping_country() ?: $billingCountry;
+            $customerPhone = $order->get_billing_phone();
+            $customerIp = $order->get_customer_ip_address();
+            if (trim((string) $customerIp) === '' && isset($_SERVER['REMOTE_ADDR'])) {
+                $customerIp = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
+            }
+            $baseImp = number_format((float) ($order->get_total() - $order->get_total_tax()), 2, '.', '');
+            $tax = number_format((float) $order->get_total_tax(), 2, '.', '');
+            $merchantCustomerId = (string) ($order->get_customer_id() ?: $order->get_billing_email() ?: ('guest-' . $orderId));
+            $names = $this->resolve_customer_name_parts($order->get_billing_first_name(), $order->get_billing_last_name());
+
             $payload = array_merge($payload, [
+                'merchantTransactionId' => 'uixdf_' . $orderId . '_' . gmdate('YmdHis'),
+                'createRegistration' => 'true',
                 'customer.givenName' => $names['given'],
                 'customer.middleName' => $names['middle'],
                 'customer.surname' => $names['surname'],
@@ -683,6 +704,10 @@ class UIX_DF_Rec_Plugin
                 'cart.items[0].quantity' => '1',
                 'cart.items[0].tax' => $tax,
             ]);
+
+            if (!empty($settings['initial_test_mode_enabled'])) {
+                $payload['testMode'] = 'EXTERNAL';
+            }
         }
 
         $payload = $this->remove_empty_payload_fields($payload);
@@ -746,10 +771,6 @@ class UIX_DF_Rec_Plugin
                 ]);
                 $order->add_order_note('Datafast: checkout enviado sin algunos SHOPPER_* opcionales: ' . implode(', ', $missingOptionalShopper));
             }
-        }
-
-        if ($isTestMode) {
-            $payload['testMode'] = 'EXTERNAL';
         }
 
         unset($payload['shopperResultURL'], $payload['shopperResultUrl']);
@@ -862,7 +883,7 @@ class UIX_DF_Rec_Plugin
             'decision' => UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '') ? 'approved' : 'declined',
         ]);
 
-        $ok = UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '') && !empty($body['registrationId']);
+        $ok = UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '');
         UIX_DF_Rec_Logger::info('Initial payment verification result', ['subscription_id' => $subscriptionId, 'ok' => $ok, 'result_code' => $body['result']['code'] ?? null, 'has_registration' => !empty($body['registrationId'])]);
 
         $orderId = isset($_GET['order_id']) ? (int) $_GET['order_id'] : 0;
@@ -1006,17 +1027,7 @@ class UIX_DF_Rec_Plugin
             exit;
         }
 
-        $payload = [
-            'entityId' => $this->sanitize_entity_id_for_transport($settings['initial_entity_id']),
-            'amount' => '1.00',
-            'currency' => 'USD',
-            'paymentType' => 'DB',
-            'merchantTransactionId' => 'uix_probe_' . gmdate('YmdHis'),
-        ];
-
-        if (!empty($settings['initial_test_mode_enabled'])) {
-            $payload['testMode'] = 'EXTERNAL';
-        }
+        $payload = $this->build_phase1_checkout_payload($settings['initial_entity_id'], '1.00', 'USD');
 
         $checkoutAttempt = $this->create_initial_checkout_with_endpoint_fallback($settings, $payload);
         $response = $checkoutAttempt['response'];

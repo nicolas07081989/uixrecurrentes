@@ -68,9 +68,11 @@ class UIX_DF_Rec_Subscription_Repo
             'updated_at' => current_time('mysql'),
         ];
 
-        if ($isSuccess && !empty($body['registrationId'])) {
+        if ($isSuccess) {
             $data['status'] = 'active';
-            $data['next_charge_at'] = $next;
+            if (!empty($body['registrationId'])) {
+                $data['next_charge_at'] = $next;
+            }
             $data['retry_count'] = 0;
         } else {
             $data['status'] = 'payment_failed';
