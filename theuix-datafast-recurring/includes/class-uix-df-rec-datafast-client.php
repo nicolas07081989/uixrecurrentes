@@ -15,19 +15,11 @@ class UIX_DF_Rec_Datafast_Client
 
     private function base_url($mode)
     {
-        if ($mode === 'recurring') {
-            return rtrim($this->settings['recurring_base_url'] ?? 'https://eu-test.oppwa.com', '/');
-        }
-
         return rtrim($this->settings['initial_base_url'] ?? 'https://eu-test.oppwa.com', '/');
     }
 
     private function token($mode)
     {
-        if ($mode === 'recurring') {
-            return $this->sanitize_token((string) ($this->settings['recurring_bearer_token'] ?? ''));
-        }
-
         return $this->sanitize_token((string) ($this->settings['initial_bearer_token'] ?? ''));
     }
 
@@ -61,12 +53,6 @@ class UIX_DF_Rec_Datafast_Client
     {
         $url = $this->base_url('initial') . $resourcePath;
         return $this->request('GET', $url, ['entityId' => $entityId], 'initial');
-    }
-
-    public function recurring_payment($registrationId, array $payload)
-    {
-        $url = $this->base_url('recurring') . '/v1/registrations/' . rawurlencode($registrationId) . '/payments';
-        return $this->request('POST', $url, $payload, 'recurring');
     }
 
     private function normalized_auth_header($mode)
