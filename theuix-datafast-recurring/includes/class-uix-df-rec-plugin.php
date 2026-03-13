@@ -36,6 +36,7 @@ class UIX_DF_Rec_Plugin
         add_action('admin_post_nopriv_uix_df_create_checkout', [$this, 'handle_create_checkout']);
         add_action('admin_post_uix_df_create_checkout', [$this, 'handle_create_checkout']);
         add_action('admin_post_uix_df_test_initial_credentials', [$this, 'handle_test_initial_credentials']);
+        add_action('admin_post_uix_df_test_initial_credentials_curl', [$this, 'handle_test_initial_credentials_curl']);
         add_action('admin_post_uix_df_test_initial_verify', [$this, 'handle_test_initial_verify']);
         add_action('template_redirect', [$this, 'handle_wc_checkout']);
         add_action('template_redirect', [$this, 'handle_return']);
@@ -528,6 +529,138 @@ class UIX_DF_Rec_Plugin
         exit;
     }
 
+    private function run_phase1_auth_diagnostic_request($baseUrl, array $settings)
+    {
+        $entityId = $this->sanitize_entity_id_for_transport($settings['initial_entity_id']);
+        $token = $this->sanitize_token_for_transport($settings['initial_bearer_token']);
+        $endpoint = rtrim((string) $baseUrl, '/') . '/v1/checkouts';
+        $payload = [
+            'entityId' => $entityId,
+            'amount' => '1.00',
+            'currency' => 'USD',
+            'paymentType' => 'DB',
+            'testMode' => 'EXTERNAL',
+        ];
+
+        $body = http_build_query($payload);
+        $headers = [
+            'Authorization: Bearer ' . $token,
+            'Content-Type: application/x-www-form-urlencoded',
+        ];
+
+        $transport = 'wp_remote_post';
+        $status = 0;
+        $rawBody = '';
+        $error = '';
+
+        if (function_exists('curl_init')) {
+            $transport = 'curl';
+            $ch = curl_init($endpoint);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+            $raw = curl_exec($ch);
+            if ($raw === false) {
+                $error = (string) curl_error($ch);
+                $rawBody = '';
+            } else {
+                $rawBody = (string) $raw;
+            }
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+        } else {
+            $response = wp_remote_post($endpoint, [
+                'timeout' => 30,
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $token,
+                    'Content-Type' => 'application/x-www-form-urlencoded',
+                ],
+                'body' => $body,
+            ]);
+            if (is_wp_error($response)) {
+                $error = $response->get_error_message();
+            } else {
+                $status = (int) wp_remote_retrieve_response_code($response);
+                $rawBody = (string) wp_remote_retrieve_body($response);
+            }
+        }
+
+        return [
+            'base_url' => rtrim((string) $baseUrl, '/'),
+            'entity_id' => $entityId,
+            'token_length' => strlen($token),
+            'token_hash8' => $token === '' ? '' : substr(hash('sha256', $token), 0, 8),
+            'status' => $status,
+            'raw_body' => $rawBody,
+            'transport' => $transport,
+            'error' => $error,
+        ];
+    }
+
+    public function handle_test_initial_credentials_curl()
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die('No autorizado');
+        }
+
+        check_admin_referer('uix_df_test_initial_credentials_curl', 'uix_df_test_curl_nonce');
+
+        $settings = $this->settings();
+        $adminUrl = admin_url('admin.php?page=uix-df-rec');
+        $missingSettings = $this->validate_initial_checkout_settings($settings);
+
+        if (!empty($missingSettings)) {
+            wp_safe_redirect(add_query_arg([
+                'uix_df_probe' => 1,
+                'uix_df_probe_status' => 'error',
+                'uix_df_probe_message' => rawurlencode('Configuración incompleta: ' . implode(', ', $missingSettings)),
+            ], $adminUrl));
+            exit;
+        }
+
+        $euResult = $this->run_phase1_auth_diagnostic_request('https://eu-test.oppwa.com', $settings);
+        $testResult = $this->run_phase1_auth_diagnostic_request('https://test.oppwa.com', $settings);
+
+        UIX_DF_Rec_Logger::info('Phase1 auth diagnostic result', [
+            'eu_test' => $euResult,
+            'test' => $testResult,
+        ]);
+
+        $bothAuthRejected = (
+            (int) $euResult['status'] === 401 && stripos((string) $euResult['raw_body'], 'invalid authentication information') !== false &&
+            (int) $testResult['status'] === 401 && stripos((string) $testResult['raw_body'], 'invalid authentication information') !== false
+        );
+
+        $selectedBaseUrl = '';
+        if ((int) $euResult['status'] < 400 && strpos((string) $euResult['raw_body'], '"id"') !== false) {
+            $selectedBaseUrl = 'https://eu-test.oppwa.com';
+        } elseif ((int) $testResult['status'] < 400 && strpos((string) $testResult['raw_body'], '"id"') !== false) {
+            $selectedBaseUrl = 'https://test.oppwa.com';
+        }
+
+        if ($selectedBaseUrl !== '' && $selectedBaseUrl !== (string) get_option('uix_df_initial_base_url', '')) {
+            update_option('uix_df_initial_base_url', $selectedBaseUrl);
+        }
+
+        $resultPayload = [
+            'eu_test' => $euResult,
+            'test' => $testResult,
+            'selected_base_url' => $selectedBaseUrl,
+            'both_auth_rejected_message' => $bothAuthRejected ? 'El plugin está enviando correctamente la solicitud, pero Datafast está rechazando las credenciales. El problema ya no parece ser de Fase 2 ni del widget.' : '',
+        ];
+
+        set_transient('uix_df_diag_result_' . get_current_user_id(), $resultPayload, 300);
+
+        wp_safe_redirect(add_query_arg([
+            'uix_df_diag' => 1,
+            'uix_df_probe_status' => $selectedBaseUrl !== '' ? 'success' : 'error',
+            'uix_df_probe_message' => rawurlencode($selectedBaseUrl !== '' ? ('Diagnóstico completado. Endpoint seleccionado automáticamente: ' . $selectedBaseUrl) : 'Diagnóstico completado.'),
+        ], $adminUrl));
+        exit;
+    }
+
     public function register_admin_menu()
     {
         add_menu_page('UIX Datafast', 'UIX Datafast', 'manage_options', 'uix-df-rec', [$this, 'render_settings_page']);
@@ -569,6 +702,23 @@ class UIX_DF_Rec_Plugin
                 <div class="notice notice-error"><p><?php echo esc_html($probeMessage); ?></p></div>
             <?php endif; ?>
 
+            <?php
+            $diag = get_transient('uix_df_diag_result_' . get_current_user_id());
+            if (is_array($diag) && isset($_GET['uix_df_diag'])) :
+            ?>
+                <h2>Diagnóstico: Probar credenciales con cURL real</h2>
+                <?php if (!empty($diag['both_auth_rejected_message'])) : ?>
+                    <div class="notice notice-error"><p><strong><?php echo esc_html($diag['both_auth_rejected_message']); ?></strong></p></div>
+                <?php endif; ?>
+                <?php if (!empty($diag['selected_base_url'])) : ?>
+                    <div class="notice notice-success"><p>Se configuró automáticamente <code>initial_base_url</code> en: <code><?php echo esc_html($diag['selected_base_url']); ?></code></p></div>
+                <?php endif; ?>
+                <h3>Resultado EU TEST</h3>
+                <pre><?php echo esc_html(wp_json_encode($diag['eu_test'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)); ?></pre>
+                <h3>Resultado TEST</h3>
+                <pre><?php echo esc_html(wp_json_encode($diag['test'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)); ?></pre>
+            <?php endif; ?>
+
             <form method="post" action="options.php">
                 <?php settings_fields('uix_df_rec_settings'); ?>
                 <h2>Primer pago (Fase 1)</h2>
@@ -588,6 +738,14 @@ class UIX_DF_Rec_Plugin
                 <input type="hidden" name="action" value="uix_df_test_initial_credentials">
                 <?php wp_nonce_field('uix_df_test_initial_credentials', 'uix_df_test_nonce'); ?>
                 <?php submit_button('Probar credenciales ahora', 'secondary', 'submit', false); ?>
+            </form>
+
+            <h2>Probar credenciales con cURL real</h2>
+            <p>Ejecuta dos pruebas server-to-server con payload mínimo + testMode=EXTERNAL: primero <code>eu-test</code> y luego <code>test</code>.</p>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="uix_df_test_initial_credentials_curl">
+                <?php wp_nonce_field('uix_df_test_initial_credentials_curl', 'uix_df_test_curl_nonce'); ?>
+                <?php submit_button('Probar credenciales con cURL real', 'secondary', 'submit', false); ?>
             </form>
 
             <h2>Probar verify con resourcePath</h2>

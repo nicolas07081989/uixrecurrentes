@@ -2,7 +2,7 @@
 /**
  * Plugin Name: TheUIX Datafast Recurring
  * Description: Flujo Fase 1 de pagos Datafast para TheUIXstudio (checkout + widget + verify).
- * Version: 0.3.0
+ * Version: 0.3.1
  * Author: TheUIXstudio
  */
 
@@ -19,7 +19,7 @@ define('UIX_DF_REC_PLUGIN_LOADED', true);
 define('UIX_DF_REC_PLUGIN_FILE', __FILE__);
 define('UIX_DF_REC_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('UIX_DF_REC_PLUGIN_URL', plugin_dir_url(__FILE__));
-define('UIX_DF_REC_PLUGIN_VERSION', '0.3.0');
+define('UIX_DF_REC_PLUGIN_VERSION', '0.3.1');
 define('UIX_DF_REC_PLUGIN_BUILD', 'includes');
 
 require_once UIX_DF_REC_PLUGIN_DIR . 'includes/class-uix-df-rec-db.php';
