@@ -163,8 +163,29 @@ class UIX_DF_Rec_Plugin
         }
 
         $settings = $this->settings();
+        $verifyBaseUrl = rtrim($settings['initial_base_url'], '/') . $resourcePath;
+        $verifyFinalUrl = add_query_arg([
+            'entityId' => $settings['initial_entity_id'],
+        ], $verifyBaseUrl);
+        UIX_DF_Rec_Logger::info('Verify return request', [
+            'subscription_id' => $subscriptionId,
+            'checkout_id' => $sub['checkout_id'] ?? null,
+            'resourcePath' => $resourcePath,
+            'verify_url' => $verifyFinalUrl,
+        ]);
+
         $client = new UIX_DF_Rec_Datafast_Client($settings);
         $verification = $client->verify_payment($resourcePath, $settings['initial_entity_id']);
+
+        UIX_DF_Rec_Logger::info('Verify return response', [
+            'subscription_id' => $subscriptionId,
+            'checkout_id' => $sub['checkout_id'] ?? null,
+            'resourcePath' => $resourcePath,
+            'verify_url' => $verifyFinalUrl,
+            'http_status' => (int) ($verification['status'] ?? 0),
+            'body' => $verification['body'] ?? null,
+            'wp_error' => $verification['error'] ?? null,
+        ]);
 
         if (!$verification['ok']) {
             wp_die('No se pudo verificar el pago');
