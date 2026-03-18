@@ -43,12 +43,18 @@ add_action('woocommerce_order_refunded', 'datafast_woocommerce_order_refunded', 
 if (!function_exists('pg_woocommerce_plugin')) {
   function pg_woocommerce_plugin()
   {
+    if (!class_exists('WC_Payment_Gateway')) {
+      return;
+    }
+
     class WC_Gateway_Datafast extends WC_Payment_Gateway
     { 
       public function __construct()
       {
         # $this->has_fields = true;
         $this->id = 'pg_woocommerce';
+        $this->has_fields = false;
+        $this->supports = array('products');
         $this->icon = apply_filters('woocomerce_datafast_icon', plugins_url('/assets/imgs/datafastcheck.png', __FILE__));
         $this->method_title = 'Datafast Plugin';
         $this->method_description = __('Modulo de pagos - Datafast', 'pg_woocommerce');
@@ -56,6 +62,7 @@ if (!function_exists('pg_woocommerce_plugin')) {
         $this->init_settings();
         $this->init_form_fields();
 
+        $this->enabled = $this->get_option('enabled', 'no');
         $this->title = $this->get_option('DATAFAST_TITLE');
         $this->description        = $this->get_option( 'DATAFAST_DESCRIPTION' ); 
         $this->instructions_success       = $this->get_option( 'DATAFAST_INSTRUCTIONS_SUCCESS' );
@@ -604,4 +611,3 @@ $datafast_custom_df_cedula=$options['DATAFAST_CUSTOM_DF_CEDULA'];
 if( $datafast_custom_df_cedula == null || !isset($datafast_custom_df_cedula)|| trim($datafast_custom_df_cedula)=='' || trim($datafast_custom_df_cedula)=='df_cedula'){
   include(dirname(__FILE__) . '/includes/cedulaform.php');
 }
-
