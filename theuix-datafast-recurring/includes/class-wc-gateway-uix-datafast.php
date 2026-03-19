@@ -226,10 +226,11 @@ if (!class_exists('WC_Gateway_UIX_Datafast')) {
 
             $subscriptionId = (int) $order->get_meta('_uix_df_subscription_id');
             if ($subscriptionId <= 0) {
+                $orderIdentificationDoc = UIX_DF_Rec_Plugin::read_order_identification_doc($order);
                 $subscriptionId = $this->repo->create_pending([
                     'full_name' => trim($order->get_billing_first_name() . ' ' . $order->get_billing_last_name()),
                     'email' => $order->get_billing_email(),
-                    'cedula_ruc' => (string) $order->get_meta('_billing_cedula', true),
+                    'cedula_ruc' => $orderIdentificationDoc,
                     'plan_slug' => 'wc-order-' . $order->get_id(),
                     'plan_title' => 'Orden WooCommerce #' . $order->get_id(),
                     'amount' => number_format((float) $order->get_total(), 2, '.', ''),
