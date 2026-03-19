@@ -43,7 +43,6 @@ class UIX_DF_Rec_Plugin
         UIX_DF_Rec_DB::schedule_events();
     }
 
-
     public function add_checkout_identification_field($fields)
     {
         if (!isset($fields['billing'])) {
@@ -559,7 +558,6 @@ class UIX_DF_Rec_Plugin
 
         return str_pad($digits, 10, '0', STR_PAD_LEFT);
     }
-
 
     public static function read_order_identification_doc(WC_Order $order)
     {

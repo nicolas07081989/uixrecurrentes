@@ -181,7 +181,6 @@ if (!class_exists('WC_Gateway_UIX_Datafast')) {
                 wc_add_notice('No se encontró la orden para procesar Datafast.', 'error');
                 return ['result' => 'fail'];
             }
-
             $order->update_status('pending', 'Pendiente de pago en Datafast UIX.');
 
             return [
