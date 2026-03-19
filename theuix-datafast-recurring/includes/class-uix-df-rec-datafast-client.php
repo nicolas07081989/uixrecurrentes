@@ -24,11 +24,14 @@ class UIX_DF_Rec_Datafast_Client
 
     private function token($mode)
     {
+        $token = '';
         if ($mode === 'recurring') {
-            return trim((string) ($this->settings['recurring_bearer_token'] ?? ''));
+            $token = trim((string) ($this->settings['recurring_bearer_token'] ?? ''));
+        } else {
+            $token = trim((string) ($this->settings['initial_bearer_token'] ?? ''));
         }
 
-        return trim((string) ($this->settings['initial_bearer_token'] ?? ''));
+        return preg_replace('/^Bearer\s+/i', '', $token);
     }
 
     public function create_checkout(array $payload)
