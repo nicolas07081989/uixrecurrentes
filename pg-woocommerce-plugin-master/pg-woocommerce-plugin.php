@@ -40,15 +40,31 @@ function datafast_woocommerce_order_refunded($order_id, $refund_id)
 // add the action
 add_action('woocommerce_order_refunded', 'datafast_woocommerce_order_refunded', 10, 2); 
 
+if (!function_exists('uix_df_normalize_brands')) {
+  function uix_df_normalize_brands($brands_raw)
+  {
+    $brands_raw = strtoupper((string) $brands_raw);
+    $brands_raw = str_replace(',', ' ', $brands_raw);
+    $brands_raw = preg_replace('/\s+/', ' ', $brands_raw);
+    return trim($brands_raw);
+  }
+}
+
 if (!function_exists('pg_woocommerce_plugin')) {
   function pg_woocommerce_plugin()
   {
+    if (!class_exists('WC_Payment_Gateway')) {
+      return;
+    }
+
     class WC_Gateway_Datafast extends WC_Payment_Gateway
     { 
       public function __construct()
       {
         # $this->has_fields = true;
         $this->id = 'pg_woocommerce';
+        $this->has_fields = false;
+        $this->supports = array('products');
         $this->icon = apply_filters('woocomerce_datafast_icon', plugins_url('/assets/imgs/datafastcheck.png', __FILE__));
         $this->method_title = 'Datafast Plugin';
         $this->method_description = __('Modulo de pagos - Datafast', 'pg_woocommerce');
@@ -56,6 +72,7 @@ if (!function_exists('pg_woocommerce_plugin')) {
         $this->init_settings();
         $this->init_form_fields();
 
+        $this->enabled = $this->get_option('enabled', 'no');
         $this->title = $this->get_option('DATAFAST_TITLE');
         $this->description        = $this->get_option( 'DATAFAST_DESCRIPTION' ); 
         $this->instructions_success       = $this->get_option( 'DATAFAST_INSTRUCTIONS_SUCCESS' );
@@ -275,174 +292,24 @@ if (!function_exists('pg_woocommerce_plugin')) {
         }
         curl_close($ch);
         $objRequest =  json_decode($responseData, true);
-        $resultCode = $objRequest["result"]["code"];
-
-        if ($resultCode == "000.200.100") {
-          $checkoutId = $objRequest["id"];
-        }
-        //echo '>>>>>>>>>>>>>>>>> '.__($checkoutId).' <<<<<<<<<<<<<<<<<<<<<<';
-        global $wpdb;
-        $table_name = $wpdb->base_prefix . 'datafast_installments';
-        $join_table_name = $wpdb->base_prefix . 'datafast_termtype';
-        $termtypes = $wpdb->prepare(
-          "SELECT $table_name.* , $join_table_name.code
-            FROM $table_name 
-            INNER JOIN $join_table_name ON $join_table_name.id=$table_name.id_termtype
-            WHERE $table_name.active=%d and ($table_name.deleted is null or $table_name.deleted =%d)",1,0
-        );
-        $options = '';
-        $defaultcode='00';
-        $defaultInstallments='00';
-        $i=0;
-        foreach ($wpdb->get_results($termtypes) as $key => $value) {
-          $options .= "<option value='" . $value->code . "|" . $value->installments . "'>" . $value->name . "</option>";
-          if($i==0){
-            $defaultcode=$value->code;
-            $defaultInstallments=$value->installments;
-          }
-          $i++;
+        $checkoutId = $objRequest["id"] ?? '';
+        $paymentWidgetUrl = $arrayUrl[0] . Routes::paymentWidget . '?checkoutId=' . rawurlencode($checkoutId);
+        $brandsValue = uix_df_normalize_brands($this->get_option('DATAFAST_ALLOWED_BRANDS', 'VISA MASTER AMEX DINERS DISCOVER'));
+        if ($brandsValue === '') {
+          $brandsValue = 'VISA MASTER AMEX DINERS DISCOVER';
         }
         ?>
-        <style>
-          .wpwl-icon
-          {
-              top:0.25em !important;
-          }
-          /*Borrar token*/
-            .wpwl-wrapper-registration-registrationId{
-              width: 8.33333333%;
-            }
-            .wpwl-wrapper-registration-brand{
-              width: 14.66666667%;
-            }
-            .wpwl-wrapper-registration-details{
-              width: 56.33333333%;
-            }
-            #deleteButton{ 
-              float: right;   
-              background-color: #d44950;
-            } 
-          /* */
-        </style>
-        <script type="text/javascript" src="https://code.jquery.com/jquery-3.2.1.js" defer></script>
-        <script src="<?php    
-          echo $arrayUrl[0].Routes::paymentWidget.'?checkoutId='.$checkoutId; 
-        ?>" defer></script>
-
-        <script type="text/javascript" defer>
-          //Borrar token
-            function deleteToken(obj){
-              if(confirm("¿Deseas eliminar esta tarjeta?")){
-                let token =$(obj).parent().find('label .wpwl-wrapper-registration-registrationId input');
-                let isChecked = token.checked;
-                var templateUrl = '<?= get_site_url(); ?>'; 
-                logFetch(templateUrl+'/wp-json/datafast/deleteCard?token='+token.val()).then(response=>{
-                  if(response=='true'){
-                    alert('Tarjeta eliminada.');
-                    $(obj).parent().remove();
-                    if($('input[name="registrationId"]').length==0){
-                      $('button[data-action="show-initial-forms"]').click();
-                    }else{
-                      $('label .wpwl-wrapper-registration-registrationId input')[0].click()
-                    }
-                  }else
-                    alert('No se pudo eliminar la tarjeta.');
-                });
-              }
-            }
-            async function logFetch(url) {
-              try {
-                const response = await fetch(url, {
-                    method: 'DELETE' 
-                });
-                return await response.text();
-              }
-              catch (err) {
-                alert('Ocurrio un error cuando se intento elminar la tarjeta.');
-                console.log('error', err);
-              }
-            }
-          //
-          function setInstallment(selObj) {
-            var isRegistration = (selObj.parentElement.parentElement.parentElement.parentElement.className+"").includes('wpwl-form-registrations');
-            var form=isRegistration?'Registration':'Card';
-            var objNumInstall = document.getElementById("numinstall"+form);
-            var objCreditType = document.getElementById("termtype"+form);
-            var res = selObj.value.split("|");
-            objCreditType.value = res[0];
-            objNumInstall.value = res[1]; 
-          }
-          var wpwlOptions = {
-            onReady: function(onReady) { 
-              if ("<?php echo $this->get_option('DATAFAST_CUSTOMERTOKEN'); ?>" == "yes" && "<?php echo $order->get_customer_id(); ?>"  !='0') {
-                var createRegistrationHtml = '<div class="customLabel">Desea guardar de manera segura sus datos?</div><div class="customInput">' +
-                  '<input type="checkbox" name="createRegistration" /></div>';
-                $('form.wpwl-form-card').find('.wpwl-button').before(createRegistrationHtml);
-              }  
-              var tipocredito = '<div class="wpwl-group installments-group  wpwl-clearfix">' +
-                '<div class="wpwl-label ">' +
-                '   Tipo de Crédito' +
-                '</div>' +
-                '<select id="cboInstallments" class="wpwl-control" onChange="javascript:setInstallment(this);">' +
-                "<?php echo $options; ?>" + 
-                '</div></div>';
-              $('form.wpwl-form-card').find('.wpwl-button').before(tipocredito);
-              $('form.wpwl-form-registrations').find('.wpwl-button').before(tipocredito);
-              var termtype=(form)=> '<input type="hidden" id="termtype'+form+'" name="customParameters[SHOPPER_TIPOCREDITO]" value="<?php echo $defaultcode; ?>">';
-              $('form.wpwl-form-card').find('.wpwl-button').before(termtype('Card'));
-              $('form.wpwl-form-registrations').find('.wpwl-button').before(termtype('Registration'));
-
-              var datafast = '<br/><br/><img src=' + '"https://www.datafast.com.ec/images/verified.png" style=' + '"display:block;margin:0 auto; width:100%;">';
-              $('form.wpwl-form-card').find('.wpwl-button').before(datafast);
-
-
-              var installs =(form)=>  '<input type="hidden" id="numinstall'+form+'" name="recurring.numberOfInstallments" value="<?php echo $defaultInstallments; ?>">';
-              $('form.wpwl-form-card').find('.wpwl-button').before(installs('Card'));
-              $('form.wpwl-form-registrations').find('.wpwl-button').before(installs('Registration'));
- 
-              $(".wpwl-button").on("click", function() {
-                var attr = $(this).attr("data-action");
-                if (attr == 'show-initial-forms') {
-                  $('.wpwl-form-registrations').fadeOut('slow');
-                }  
-              }); 
-              //Borrar token
-                var deleteButton =`
-                <div id="deleteButton" onClick='deleteToken(this)' class="wpwl-icon ui-state-default ui-corner-all delete" type="button">
-                  <span class="ui-icon ui-icon-close"></span>
-                </div>`;
-                $('form.wpwl-form-registrations').find('.wpwl-registration').after(deleteButton);
-              //
-            },
-            style: ("<?php echo $this->get_option('DATAFAST_STYLE'); ?>" == "yes" ? "card" : "plain"), 
-            onBeforeSubmitCard: function(e) { 
-              const holder = $('.wpwl-control-cardHolder').val();
-              if (holder.trim().length < 2) {
-                $('.wpwl-control-cardHolder').addClass('wpwl-has-error').after('<div class="wpwl-hint wpwl-hint-cardHolderError">Nombre del titular de la tarjeta no válido</div>');
-                $(".wpwl-button-pay").addClass('wpwl-button-error').attr('disabled','disabled');
-                return false;
-              } 
-              return true;
-            },
-            locale: "es",
-            maskCvv: true,
-            brandDetection: true,
-            brandDetectionPriority: ["VISA","ALIA","MASTER","AMEX","DINERS","DISCOVER"], 
-            labels: {
-              cvv: "CVV",
-              cardHolder: "Nombre(Igual que en la tarjeta)"
-            },
-            registrations: {
-              requireCvv:("<?php echo $this->get_option('DATAFAST_REQUIRECVV'); ?>" == "yes"),
-              hideInitialPaymentForms: true
-            }
-          }
+        <script>
+        window.wpwlOptions = {
+          style: "plain",
+          locale: "es",
+          brandDetection: false
+        };
         </script>
+        <script src="<?php echo esc_url($paymentWidgetUrl); ?>"></script>
+        <form action="<?php echo esc_url($urlreturn); ?>" class="paymentWidgets" data-brands="<?php echo esc_attr($brandsValue); ?>"></form>
 
-        <form action="<?php echo ($urlreturn); ?>" class="paymentWidgets" id="datafastPaymentForm" data-brands="VISA MASTER DINERS DISCOVER AMEX ALIA">
-        </form>
-
-<?php 
+<?php
       }
       public function buildInitialBody($order)
       {
@@ -604,4 +471,3 @@ $datafast_custom_df_cedula=$options['DATAFAST_CUSTOM_DF_CEDULA'];
 if( $datafast_custom_df_cedula == null || !isset($datafast_custom_df_cedula)|| trim($datafast_custom_df_cedula)=='' || trim($datafast_custom_df_cedula)=='df_cedula'){
   include(dirname(__FILE__) . '/includes/cedulaform.php');
 }
-
