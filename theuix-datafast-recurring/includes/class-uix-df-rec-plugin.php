@@ -161,6 +161,18 @@ class UIX_DF_Rec_Plugin
         if (!$sub) {
             wp_die('Suscripción no encontrada');
         }
+        $expectedCheckoutId = (string) ($sub['checkout_id'] ?? '');
+        if ($expectedCheckoutId) {
+            $resourceCheckoutId = $this->extract_checkout_id_from_resource_path($resourcePath);
+            if (!$resourceCheckoutId || !hash_equals($expectedCheckoutId, $resourceCheckoutId)) {
+                UIX_DF_Rec_Logger::info('Verify return blocked by checkout mismatch', [
+                    'subscription_id' => $subscriptionId,
+                    'expected_checkout_id' => $expectedCheckoutId,
+                    'resource_checkout_id' => $resourceCheckoutId,
+                ]);
+                wp_die('Retorno inválido (checkout)');
+            }
+        }
 
         $settings = $this->settings();
         $verifyBaseUrl = rtrim($settings['initial_base_url'], '/') . $resourcePath;
@@ -218,6 +230,19 @@ class UIX_DF_Rec_Plugin
         }
         echo '</body></html>';
         exit;
+    }
+
+    private function extract_checkout_id_from_resource_path($resourcePath)
+    {
+        if (!is_string($resourcePath) || $resourcePath === '') {
+            return '';
+        }
+
+        if (preg_match('#/checkouts/([^/]+)/payment#', $resourcePath, $matches)) {
+            return sanitize_text_field($matches[1]);
+        }
+
+        return '';
     }
 
     public function run_recurring_runner()
