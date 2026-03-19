@@ -60,6 +60,11 @@ class UIX_DF_Rec_Plugin
             <p><label>Nombre completo<br><input type="text" name="full_name" required></label></p>
             <p><label>Email<br><input type="email" name="email" required></label></p>
             <p><label>Cédula/RUC<br><input type="text" name="cedula_ruc" required></label></p>
+            <p><label>Teléfono<br><input type="text" name="phone" required></label></p>
+            <p><label>Dirección facturación<br><input type="text" name="billing_street1" required></label></p>
+            <p><label>Dirección envío<br><input type="text" name="shipping_street1" required></label></p>
+            <p><label>País facturación (ISO2, ej. EC)<br><input type="text" name="billing_country" required maxlength="2"></label></p>
+            <p><label>País envío (ISO2, ej. EC)<br><input type="text" name="shipping_country" required maxlength="2"></label></p>
             <p><button type="submit">Suscribirme y pagar</button></p>
         </form>
         <?php
@@ -77,9 +82,14 @@ class UIX_DF_Rec_Plugin
         $cedula = sanitize_text_field(wp_unslash($_POST['cedula_ruc'] ?? ''));
         $planSlug = sanitize_text_field(wp_unslash($_POST['plan_slug'] ?? ''));
         $planTitle = sanitize_text_field(wp_unslash($_POST['plan_title'] ?? ''));
+        $phone = sanitize_text_field(wp_unslash($_POST['phone'] ?? ''));
+        $billingStreet = sanitize_text_field(wp_unslash($_POST['billing_street1'] ?? ''));
+        $shippingStreet = sanitize_text_field(wp_unslash($_POST['shipping_street1'] ?? ''));
+        $billingCountry = strtoupper(sanitize_text_field(wp_unslash($_POST['billing_country'] ?? '')));
+        $shippingCountry = strtoupper(sanitize_text_field(wp_unslash($_POST['shipping_country'] ?? '')));
         $amount = number_format((float) ($_POST['amount'] ?? 0), 2, '.', '');
 
-        if (!$fullName || !$email || !$cedula || $amount <= 0) {
+        if (!$fullName || !$email || !$cedula || !$phone || !$billingStreet || !$shippingStreet || strlen($billingCountry) !== 2 || strlen($shippingCountry) !== 2 || $amount <= 0) {
             wp_die('Datos inválidos');
         }
 
@@ -100,7 +110,7 @@ class UIX_DF_Rec_Plugin
             'subscription_id' => $subscriptionId,
         ], home_url('/'));
 
-        $nameParts = preg_split('/\s+/', trim($fullName), 2);
+        $nameParts = self::split_name($fullName);
         $payload = [
             'entityId' => $settings['initial_entity_id'],
             'amount' => $amount,
@@ -108,25 +118,44 @@ class UIX_DF_Rec_Plugin
             'paymentType' => 'DB',
             'createRegistration' => 'true',
             'shopperResultURL' => $returnUrl,
-            'customer.givenName' => $nameParts[0] ?? $fullName,
-            'customer.surname' => $nameParts[1] ?? 'Cliente',
+            'customer.givenName' => $nameParts['given'],
+            'customer.middleName' => $nameParts['middle'],
+            'customer.surname' => $nameParts['surname'],
             'customer.email' => $email,
             'customer.identificationDocType' => 'IDCARD',
-            'customer.identificationDocId' => $cedula,
+            'customer.identificationDocId' => self::normalize_identification($cedula),
             'customParameters[SHOPPER_VERSIONDF]' => '2',
             'cart.items[0].name' => $planTitle,
+            'cart.items[0].description' => $planTitle,
             'cart.items[0].price' => $amount,
             'cart.items[0].quantity' => '1',
-            'cart.items[0].tax' => '0.00',
+            'customer.ip' => WC_Geolocation::get_ip_address(),
+            'customer.phone' => $phone,
+            'shipping.street1' => $shippingStreet,
+            'billing.street1' => $billingStreet,
+            'shipping.country' => $shippingCountry,
+            'billing.country' => $billingCountry,
+            'customer.merchantCustomerId' => 'SUB-' . $subscriptionId,
+            'merchantTransactionId' => 'SUB-' . $subscriptionId . '-' . gmdate('YmdHis') . '-' . wp_rand(1000, 9999),
+            'customParameters[SHOPPER_VAL_BASE0]' => '0.00',
+            'customParameters[SHOPPER_VAL_BASEIMP]' => $amount,
+            'customParameters[SHOPPER_VAL_IVA]' => '0.00',
+            'customParameters[SHOPPER_MID]' => $settings['initial_mid'],
+            'customParameters[SHOPPER_TID]' => $settings['initial_tid'],
+            'customParameters[SHOPPER_ECI]' => '0103910',
+            'customParameters[SHOPPER_PSERV]' => '17913101',
+            'risk.parameters[USER_DATA2]' => $settings['initial_commerce_name'],
         ];
 
         if (!empty($settings['initial_test_mode_enabled'])) {
             $payload['testMode'] = 'EXTERNAL';
         }
 
+        UIX_DF_Rec_Logger::info('Initial checkout request', ['subscription_id' => $subscriptionId, 'payload' => $payload]);
         $response = $client->create_checkout($payload);
+        UIX_DF_Rec_Logger::info('Initial checkout response', ['subscription_id' => $subscriptionId, 'response' => $response]);
+
         if (!$response['ok'] || empty($response['body']['id'])) {
-            UIX_DF_Rec_Logger::info('Checkout creation failed', $response);
             wp_die('No se pudo crear checkout. Revisa configuración Datafast.');
         }
 
@@ -152,6 +181,8 @@ class UIX_DF_Rec_Plugin
 
         $subscriptionId = isset($_GET['subscription_id']) ? (int) $_GET['subscription_id'] : 0;
         $resourcePath = isset($_GET['resourcePath']) ? sanitize_text_field(wp_unslash($_GET['resourcePath'])) : '';
+        $orderId = isset($_GET['order_id']) ? (int) $_GET['order_id'] : 0;
+        $orderKey = isset($_GET['key']) ? sanitize_text_field(wp_unslash($_GET['key'])) : '';
 
         if ($subscriptionId <= 0 || !$resourcePath) {
             wp_die('Retorno inválido');
@@ -210,6 +241,22 @@ class UIX_DF_Rec_Plugin
 
         $ok = UIX_DF_Rec_Result_Codes::is_success($body['result']['code'] ?? '') && !empty($body['registrationId']);
 
+        if ($orderId > 0) {
+            $order = wc_get_order($orderId);
+            if ($order && hash_equals((string) $order->get_order_key(), $orderKey)) {
+                if ($ok) {
+                    $order->payment_complete((string) ($body['id'] ?? ''));
+                    $order->add_order_note('Pago Datafast verificado. registrationId guardado en subscripción ' . $subscriptionId . '.');
+                    wp_safe_redirect($order->get_checkout_order_received_url());
+                    exit;
+                }
+
+                $order->update_status('failed', 'Pago Datafast rechazado: ' . ($body['result']['description'] ?? 'Sin detalle'));
+                wp_safe_redirect($order->get_checkout_payment_url(true));
+                exit;
+            }
+        }
+
         echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Resultado pago</title></head><body>';
         if ($ok) {
             echo '<h2>¡Suscripción activada!</h2><p>Tu pago inicial fue exitoso.</p>';
@@ -224,6 +271,7 @@ class UIX_DF_Rec_Plugin
     {
         $settings = $this->settings();
         if (empty($settings['recurring_entity_id']) || empty($settings['recurring_bearer_token'])) {
+            UIX_DF_Rec_Logger::info('Recurring skipped: missing recurring config');
             return;
         }
 
@@ -231,20 +279,40 @@ class UIX_DF_Rec_Plugin
         $subs = $this->repo->due_for_recurring(25);
 
         foreach ($subs as $sub) {
+            $amount = number_format((float) $sub['amount'], 2, '.', '');
             $payload = [
                 'entityId' => $settings['recurring_entity_id'],
-                'amount' => number_format((float) $sub['amount'], 2, '.', ''),
+                'amount' => $amount,
                 'currency' => 'USD',
                 'paymentType' => 'DB',
+                'recurringType' => 'REPEATED',
                 'risk.parameters[USER_DATA1]' => 'REPEATED',
+                'risk.parameters[USER_DATA2]' => $settings['recurring_commerce_name'],
+                'merchantTransactionId' => 'REC-' . $sub['id'] . '-' . gmdate('YmdHis') . '-' . wp_rand(1000, 9999),
+                'customParameters[SHOPPER_MID]' => $settings['recurring_mid'],
+                'customParameters[SHOPPER_TID]' => $settings['recurring_tid'],
+                'customParameters[SHOPPER_ECI]' => '0103910',
+                'customParameters[SHOPPER_PSERV]' => '17913101',
+                'customParameters[SHOPPER_VAL_BASE0]' => '0.00',
+                'customParameters[SHOPPER_VAL_BASEIMP]' => $amount,
+                'customParameters[SHOPPER_VAL_IVA]' => '0.00',
+                'customParameters[SHOPPER_VERSIONDF]' => '2',
             ];
 
             if (!empty($settings['recurring_test_mode_enabled'])) {
                 $payload['testMode'] = 'EXTERNAL';
             }
 
+            UIX_DF_Rec_Logger::info('Recurring request', ['subscription_id' => (int) $sub['id'], 'payload' => $payload]);
             $response = $client->recurring_payment($sub['registration_id'], $payload);
             $body = $response['body'] ?? [];
+            UIX_DF_Rec_Logger::info('Recurring response', [
+                'subscription_id' => (int) $sub['id'],
+                'status' => (int) ($response['status'] ?? 0),
+                'ok' => (bool) ($response['ok'] ?? false),
+                'body' => $body,
+                'error' => $response['error'] ?? null,
+            ]);
 
             $this->repo->add_attempt([
                 'subscription_id' => (int) $sub['id'],
@@ -277,10 +345,16 @@ class UIX_DF_Rec_Plugin
             'uix_df_initial_bearer_token',
             'uix_df_initial_base_url',
             'uix_df_initial_test_mode_enabled',
+            'uix_df_initial_mid',
+            'uix_df_initial_tid',
+            'uix_df_initial_commerce_name',
             'uix_df_recurring_entity_id',
             'uix_df_recurring_bearer_token',
             'uix_df_recurring_base_url',
             'uix_df_recurring_test_mode_enabled',
+            'uix_df_recurring_mid',
+            'uix_df_recurring_tid',
+            'uix_df_recurring_commerce_name',
             'uix_df_default_max_retries',
         ];
 
@@ -298,27 +372,24 @@ class UIX_DF_Rec_Plugin
         ?>
         <div class="wrap">
             <h1>UIX Datafast Recurrentes</h1>
+            <p>La configuración oficial para gateway WooCommerce se gestiona en WooCommerce &gt; Ajustes &gt; Pagos &gt; Datafast UIX.</p>
             <form method="post" action="options.php">
                 <?php settings_fields('uix_df_rec_settings'); ?>
-                <h2>Primer pago</h2>
+                <h2>Checkout inicial / Fase 2</h2>
                 <table class="form-table">
                     <tr><th>Entity ID</th><td><input class="regular-text" name="uix_df_initial_entity_id" value="<?php echo esc_attr(get_option('uix_df_initial_entity_id', '')); ?>"></td></tr>
-                    <tr><th>Bearer Token</th><td><input class="regular-text" name="uix_df_initial_bearer_token" value="<?php echo esc_attr(get_option('uix_df_initial_bearer_token', '')); ?>"></td></tr>
+                    <tr><th>Access Token (sin Bearer)</th><td><input class="regular-text" name="uix_df_initial_bearer_token" value="<?php echo esc_attr(get_option('uix_df_initial_bearer_token', '')); ?>"></td></tr>
                     <tr><th>Base URL</th><td><input class="regular-text" name="uix_df_initial_base_url" value="<?php echo esc_attr(get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com')); ?>"></td></tr>
-                    <tr><th>Test mode</th><td><label><input type="checkbox" name="uix_df_initial_test_mode_enabled" value="1" <?php checked(get_option('uix_df_initial_test_mode_enabled', 1), 1); ?>> EXTERNAL</label></td></tr>
                 </table>
 
                 <h2>Cobro recurrente</h2>
                 <table class="form-table">
                     <tr><th>Entity ID</th><td><input class="regular-text" name="uix_df_recurring_entity_id" value="<?php echo esc_attr(get_option('uix_df_recurring_entity_id', '')); ?>"></td></tr>
-                    <tr><th>Bearer Token</th><td><input class="regular-text" name="uix_df_recurring_bearer_token" value="<?php echo esc_attr(get_option('uix_df_recurring_bearer_token', '')); ?>"></td></tr>
-                    <tr><th>Base URL</th><td><input class="regular-text" name="uix_df_recurring_base_url" value="<?php echo esc_attr(get_option('uix_df_recurring_base_url', 'https://eu-test.oppwa.com')); ?>"></td></tr>
-                    <tr><th>Test mode</th><td><label><input type="checkbox" name="uix_df_recurring_test_mode_enabled" value="1" <?php checked(get_option('uix_df_recurring_test_mode_enabled', 1), 1); ?>> EXTERNAL</label></td></tr>
-                    <tr><th>Max retries</th><td><input type="number" min="1" max="10" name="uix_df_default_max_retries" value="<?php echo esc_attr(get_option('uix_df_default_max_retries', 3)); ?>"></td></tr>
+                    <tr><th>Access Token (sin Bearer)</th><td><input class="regular-text" name="uix_df_recurring_bearer_token" value="<?php echo esc_attr(get_option('uix_df_recurring_bearer_token', '')); ?>"></td></tr>
+                    <tr><th>Base URL</th><td><input class="regular-text" name="uix_df_recurring_base_url" value="<?php echo esc_attr(get_option('uix_df_recurring_base_url', 'https://test.oppwa.com')); ?>"></td></tr>
                 </table>
                 <?php submit_button(); ?>
             </form>
-            <p>Shortcode: <code>[uix_subscribe_form plan="plan-pro" title="Plan Pro" amount="49.00"]</code></p>
         </div>
         <?php
     }
@@ -359,17 +430,101 @@ class UIX_DF_Rec_Plugin
         <?php
     }
 
-    private function settings()
+    public function settings()
     {
         return [
             'initial_entity_id' => get_option('uix_df_initial_entity_id', ''),
             'initial_bearer_token' => get_option('uix_df_initial_bearer_token', ''),
             'initial_base_url' => get_option('uix_df_initial_base_url', 'https://eu-test.oppwa.com'),
             'initial_test_mode_enabled' => (bool) get_option('uix_df_initial_test_mode_enabled', 1),
+            'initial_mid' => get_option('uix_df_initial_mid', '1000000505'),
+            'initial_tid' => get_option('uix_df_initial_tid', 'PD100406'),
+            'initial_commerce_name' => get_option('uix_df_initial_commerce_name', 'THEUIXSTUDIO'),
             'recurring_entity_id' => get_option('uix_df_recurring_entity_id', ''),
             'recurring_bearer_token' => get_option('uix_df_recurring_bearer_token', ''),
-            'recurring_base_url' => get_option('uix_df_recurring_base_url', 'https://eu-test.oppwa.com'),
+            'recurring_base_url' => get_option('uix_df_recurring_base_url', 'https://test.oppwa.com'),
             'recurring_test_mode_enabled' => (bool) get_option('uix_df_recurring_test_mode_enabled', 1),
+            'recurring_mid' => get_option('uix_df_recurring_mid', '1000000505'),
+            'recurring_tid' => get_option('uix_df_recurring_tid', 'PD100406'),
+            'recurring_commerce_name' => get_option('uix_df_recurring_commerce_name', 'THEUIXSTUDIO'),
+        ];
+    }
+
+    public static function split_name($fullName)
+    {
+        $parts = preg_split('/\s+/', trim((string) $fullName));
+        return [
+            'given' => $parts[0] ?? '',
+            'middle' => $parts[1] ?? ($parts[0] ?? ''),
+            'surname' => isset($parts[2]) ? implode(' ', array_slice($parts, 2)) : ($parts[1] ?? ($parts[0] ?? '')),
+        ];
+    }
+
+    public static function normalize_identification($document)
+    {
+        $digits = preg_replace('/\D+/', '', (string) $document);
+        if (strlen($digits) > 10) {
+            $digits = substr($digits, 0, 10);
+        }
+
+        if ($digits === '') {
+            return '';
+        }
+
+        return str_pad($digits, 10, '0', STR_PAD_LEFT);
+    }
+
+    public static function build_initial_payload_from_order(WC_Order $order, $subscriptionId, $docId, array $settings)
+    {
+        $total = number_format((float) $order->get_total(), 2, '.', '');
+        $tax = number_format((float) $order->get_total_tax(), 2, '.', '');
+        $baseImp = number_format(max(0, (float) $order->get_total() - (float) $order->get_total_tax()), 2, '.', '');
+        $ip = WC_Geolocation::get_ip_address();
+        $fullName = trim($order->get_billing_first_name() . ' ' . $order->get_billing_last_name());
+        $nameParts = self::split_name($fullName);
+        $shippingStreet = $order->get_shipping_address_1() ?: $order->get_billing_address_1();
+        $shippingCountry = $order->get_shipping_country() ?: $order->get_billing_country();
+
+        return [
+            'entityId' => $settings['initial_entity_id'],
+            'amount' => $total,
+            'currency' => 'USD',
+            'paymentType' => 'DB',
+            'createRegistration' => 'true',
+            'shopperResultURL' => add_query_arg([
+                'uix_df_return' => 1,
+                'subscription_id' => (int) $subscriptionId,
+                'order_id' => $order->get_id(),
+                'key' => $order->get_order_key(),
+            ], home_url('/')),
+            'customer.givenName' => $nameParts['given'],
+            'customer.middleName' => $nameParts['middle'],
+            'customer.surname' => $nameParts['surname'],
+            'customer.ip' => $ip,
+            'customer.merchantCustomerId' => 'WC-CUST-' . ($order->get_user_id() ?: 'guest-' . $order->get_id()),
+            'merchantTransactionId' => 'WC-' . $order->get_id() . '-' . gmdate('YmdHis') . '-' . wp_rand(1000, 9999),
+            'customer.email' => $order->get_billing_email(),
+            'customer.identificationDocType' => 'IDCARD',
+            'customer.identificationDocId' => $docId,
+            'customer.phone' => $order->get_billing_phone(),
+            'shipping.street1' => $shippingStreet,
+            'billing.street1' => $order->get_billing_address_1(),
+            'shipping.country' => $shippingCountry,
+            'billing.country' => $order->get_billing_country(),
+            'cart.items[0].name' => 'Orden WooCommerce #' . $order->get_id(),
+            'cart.items[0].description' => 'Compra en ' . get_bloginfo('name'),
+            'cart.items[0].price' => $total,
+            'cart.items[0].quantity' => '1',
+            'testMode' => !empty($settings['initial_test_mode_enabled']) ? 'EXTERNAL' : '',
+            'customParameters[SHOPPER_VAL_BASE0]' => '0.00',
+            'customParameters[SHOPPER_VAL_BASEIMP]' => $baseImp,
+            'customParameters[SHOPPER_VAL_IVA]' => $tax,
+            'customParameters[SHOPPER_MID]' => $settings['initial_mid'],
+            'customParameters[SHOPPER_TID]' => $settings['initial_tid'],
+            'customParameters[SHOPPER_ECI]' => '0103910',
+            'customParameters[SHOPPER_PSERV]' => '17913101',
+            'customParameters[SHOPPER_VERSIONDF]' => '2',
+            'risk.parameters[USER_DATA2]' => $settings['initial_commerce_name'],
         ];
     }
 }
