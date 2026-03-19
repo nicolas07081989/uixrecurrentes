@@ -283,10 +283,18 @@ if (!function_exists('pg_woocommerce_plugin')) {
         curl_close($ch);
         $objRequest =  json_decode($responseData, true);
         $resultCode = $objRequest["result"]["code"];
+        $checkoutId = $objRequest["id"] ?? '';
+        $paymentWidgetUrl = $arrayUrl[0] . Routes::paymentWidget . '?checkoutId=' . rawurlencode($checkoutId);
 
-        if ($resultCode == "000.200.100") {
-          $checkoutId = $objRequest["id"];
-        }
+        $defaultBrands = 'VISA MASTER AMEX DINERS DISCOVER';
+        $configuredBrands = trim((string) $this->get_option('DATAFAST_ALLOWED_BRANDS', $defaultBrands));
+        $normalizedBrands = strtoupper(str_replace(',', ' ', $configuredBrands));
+        $normalizedBrands = preg_replace('/\s+/', ' ', $normalizedBrands);
+        $requestedBrands = array_filter(explode(' ', trim($normalizedBrands)));
+        $allowedCardBrands = array('VISA', 'MASTER', 'AMEX', 'DINERS', 'DISCOVER');
+        $filteredBrands = array_values(array_intersect($allowedCardBrands, $requestedBrands));
+        $brandsValue = !empty($filteredBrands) ? implode(' ', $filteredBrands) : $defaultBrands;
+        $brandsPriorityJs = '["' . implode('","', explode(' ', $brandsValue)) . '"]';
         //echo '>>>>>>>>>>>>>>>>> '.__($checkoutId).' <<<<<<<<<<<<<<<<<<<<<<';
         global $wpdb;
         $table_name = $wpdb->base_prefix . 'datafast_installments';
@@ -332,9 +340,7 @@ if (!function_exists('pg_woocommerce_plugin')) {
           /* */
         </style>
         <script type="text/javascript" src="https://code.jquery.com/jquery-3.2.1.js" defer></script>
-        <script src="<?php    
-          echo $arrayUrl[0].Routes::paymentWidget.'?checkoutId='.$checkoutId; 
-        ?>" defer></script>
+        <script src="<?php echo esc_url($paymentWidgetUrl); ?>" defer></script>
 
         <script type="text/javascript" defer>
           //Borrar token
@@ -434,7 +440,7 @@ if (!function_exists('pg_woocommerce_plugin')) {
             locale: "es",
             maskCvv: true,
             brandDetection: true,
-            brandDetectionPriority: ["VISA","ALIA","MASTER","AMEX","DINERS","DISCOVER"], 
+            brandDetectionPriority: <?php echo $brandsPriorityJs; ?>, 
             labels: {
               cvv: "CVV",
               cardHolder: "Nombre(Igual que en la tarjeta)"
@@ -446,7 +452,7 @@ if (!function_exists('pg_woocommerce_plugin')) {
           }
         </script>
 
-        <form action="<?php echo ($urlreturn); ?>" class="paymentWidgets" id="datafastPaymentForm" data-brands="VISA MASTER DINERS DISCOVER AMEX ALIA">
+        <form action="<?php echo esc_url($urlreturn); ?>" class="paymentWidgets" id="datafastPaymentForm" data-brands="<?php echo esc_attr($brandsValue); ?>">
         </form>
 
 <?php 
